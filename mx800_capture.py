@@ -280,23 +280,12 @@ def build_assoc_request(waves: bool = False) -> bytes:
     session_body = ASSOC_REQ_SESSION_DATA + pres
     return bytes([ASSOC_REQ_SESSION_HEADER[0], len(session_body)]) + session_body
 
-def build_extended_poll(invoke_id: int, obj_class: int, attr_grp: int,
+def build_extended_poll(invoke_id: int, obj_class: int, attr_grp: int = 0x0000,
                         period_ms: int = 256) -> bytes:
-    """Extended Poll Data Request pour les waveforms (PIPG p.59)."""
-    # PollDataReqPeriod: active_period en 1/8ms ticks
-    active_ticks = period_ms * 8 * 8  # 256ms × 8 × 8 = 16384 ticks = 2 secondes actives
-    # poll_ext_attr: NOM_ATTR_TIME_PD_POLL + PollDataReqPeriod
-    ext_attr = struct.pack('>HHHI',
-        0xF13E,          # NOM_ATTR_TIME_PD_POLL
-        4,               # length
-        active_ticks >> 16, active_ticks & 0xFFFF  # RelativeTime (u32)
-    )
-    # En fait RelativeTime est u32 → repack
-    ext_attr = struct.pack('>HHI', 0xF13E, 4, active_ticks)
-    attr_list = struct.pack('>HH', 1, len(ext_attr)) + ext_attr
-
+    """Extended Poll Data Request pour les waveforms (PIPG p.59/295)."""
+    # PollMdibDataReqExt: poll_num(2)+TYPE(4)+attr_grp(2)+AttributeList vide(4)
     payload = struct.pack('>HHHH', invoke_id & 0xFFFF, 0x0001, obj_class, attr_grp)
-    payload += attr_list
+    payload += struct.pack('>HH', 0, 0)  # AttributeList count=0, length=0
 
     action_data = (
         struct.pack('>HHH', NOM_MOC_VMS_MDS, 0, 0) +
