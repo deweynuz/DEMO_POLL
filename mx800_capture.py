@@ -298,26 +298,36 @@ def parse_string_attr(data: bytes) -> str:
     str_len = struct.unpack_from('>H', data)[0]
     if str_len == 0 or 2 + str_len > len(data):
         return ''
-    return data[2:2 + str_len].rstrip(b'\x00').decode('utf-8', errors='replace').strip()
+    raw = data[2:2 + str_len]
+    # Philips encode les strings en UTF-16 big-endian
+    try:
+        return raw.decode('utf-16-be').rstrip('\x00').strip()
+    except Exception:
+        return raw.rstrip(b'\x00').decode('utf-8', errors='replace').strip()
 
-def parse_poll_payload(data: bytes) -> bytes | None:
-    """Extrait le PollMdibDataReply depuis un paquet brut (gère RORS et ROLRS)."""
+def parse_poll_payload(data: bytes) -> tuple[bytes, int] | tuple[None, None]:
+    """
+    Extrait (PollMdibDataReply, invoke_id) depuis un paquet brut.
+    Gère RORS (résultat final) et ROLRS (linked result intermédiaire).
+    """
     try:
         offset = 4  # SPpdu
         ro_type = struct.unpack_from('>H', data, offset)[0]
         offset += 4  # ROapdus
 
         if ro_type == RORS_APDU:
-            offset += 6  # RORSapdu: invoke_id(2)+cmd(2)+len(2)
+            invoke_id = struct.unpack_from('>H', data, offset)[0]
+            offset += 6  # invoke_id(2)+cmd(2)+len(2)
         elif ro_type == ROLRS_APDU:
-            offset += 8  # ROLRSapdu: state(1)+count(1)+invoke_id(2)+cmd(2)+len(2)
+            invoke_id = struct.unpack_from('>H', data, offset + 2)[0]
+            offset += 8  # state(1)+count(1)+invoke_id(2)+cmd(2)+len(2)
         else:
-            return None
+            return None, None
 
         offset += 10  # ActionResult: managed_obj(6)+action_type(2)+length(2)
-        return data[offset:]
+        return data[offset:], invoke_id
     except Exception:
-        return None
+        return None, None
 
 def parse_attr_list(data: bytes, offset: int) -> tuple[list, int]:
     """
@@ -350,7 +360,7 @@ def parse_nu_obs_value(val_data: bytes) -> dict:
     physio_id = struct.unpack_from('>H', val_data, 0)[0]
     state     = struct.unpack_from('>H', val_data, 2)[0]
     # Valide si octet haut de state == 0
-    if (state & 0xFF00) != 0:
+    if state & 0x8000:  # seulement INVALID bloque la valeur
         return result
     raw_float = struct.unpack_from('>I', val_data, 6)[0]
     value = parse_float_type(raw_float)
@@ -605,6 +615,10 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     poll_num      = 1
     last_nu_poll  = 0.0
     last_demo_poll = 0.0
+    # Accumulation des linked results (plusieurs paquets pour un même poll)
+    pending       = {}   # invoke_id → dict valeurs accumulées
+    pending_ts    = {}   # invoke_id → timestamp premier paquet
+    pending_obj   = {}   # invoke_id → obj_code
 
     def send_assoc():
         nonlocal associated
@@ -680,54 +694,63 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
 
                 # ── Poll Result ───────────────────────────────────────────
                 elif mtype == 'POLL_RESULT' and associated and session_id:
-                    payload = parse_poll_payload(data)
+                    payload, invoke_id = parse_poll_payload(data)
                     if payload is None:
                         continue
 
-                    # Détermine le type d'objet retourné (offset 16 dans PollMdibDataReply)
-                    obj_code = struct.unpack_from('>H', payload, 18)[0] if len(payload) >= 20 else 0
+                    obj_code = struct.unpack_from('>H', payload, 16)[0] if len(payload) >= 18 else 0
+                    values   = parse_poll_result(payload, obj_code)
 
+                    # ── Numériques : accumule les linked results ──────────
                     if obj_code == NOM_MOC_VMO_METRIC_NU:
-                        values = parse_poll_result(payload, NOM_MOC_VMO_METRIC_NU)
-                        if values:
-                            ts = datetime.now().isoformat()
-                            # Ajoute infos patient au contexte
-                            values.update({
-                                'patient_id':  patient_info.get('patient_id', ''),
-                                'family_name': patient_info.get('family_name', ''),
-                                'given_name':  patient_info.get('given_name', ''),
-                            })
-                            # SQLite
-                            insert_numerics(conn, session_id, patient_db_id, ts, values)
-                            # CSV
-                            if csv_writer:
-                                csv_writer.writerow({'timestamp': ts, **values})
-                                csv_file.flush()
-                            # Log compact
-                            hr  = values.get('HR', '-')
-                            spo = values.get('SpO2', '-')
-                            abp = f"{values.get('ABP_sys','-')}/{values.get('ABP_dia','-')}"
-                            log.info(f"HR={hr} SpO2={spo}% ABP={abp} mmHg")
+                        if invoke_id not in pending:
+                            pending[invoke_id]     = {}
+                            pending_ts[invoke_id]  = datetime.now().isoformat()
+                            pending_obj[invoke_id] = obj_code
+                        pending[invoke_id].update(values)
 
+                        # Paquet final = RORS ou payload vide (48o terminateur)
+                        ro_type  = struct.unpack_from('>H', data, 4)[0]
+                        is_final = (ro_type == RORS_APDU) or (len(payload) <= 24)
+                        if is_final:
+                            merged = pending.pop(invoke_id, {})
+                            ts     = pending_ts.pop(invoke_id, datetime.now().isoformat())
+                            pending_obj.pop(invoke_id, None)
+                            if merged:
+                                merged.update({
+                                    'patient_id':  patient_info.get('patient_id', ''),
+                                    'family_name': patient_info.get('family_name', ''),
+                                    'given_name':  patient_info.get('given_name', ''),
+                                })
+                                insert_numerics(conn, session_id, patient_db_id, ts, merged)
+                                if csv_writer:
+                                    csv_writer.writerow({'timestamp': ts, **merged})
+                                    csv_file.flush()
+                                hr  = merged.get('HR', '-')
+                                spo = merged.get('SpO2', '-')
+                                abp = f"{merged.get('ABP_sys','-')}/{merged.get('ABP_dia','-')}"
+                                tmp = merged.get('Tblood') or merged.get('Tcore') or merged.get('Temp', '-')
+                                log.info(f"HR={hr} SpO2={spo}% ABP={abp} mmHg T={tmp}°C")
+
+                    # ── Démographiques ────────────────────────────────────
                     elif obj_code == NOM_MOC_PT_DEMOG:
-                        demo = parse_poll_result(payload, NOM_MOC_PT_DEMOG)
+                        demo = values
                         if demo and demo.get('demo_state') == 'ADMITTED':
                             changed = demo.get('patient_id') != patient_info.get('patient_id')
-                            patient_info = demo
+                            patient_info  = demo
                             patient_db_id = upsert_patient(conn, session_id, demo)
-                            # Réouvre CSV si nouveau patient
                             if changed or csv_writer is None:
                                 if csv_file:
                                     csv_file.close()
                                 csv_file, csv_writer = get_csv_writer(
                                     csv_dir, session_id, demo.get('patient_id', 'unknown')
                                 )
-                            # JSON pour Flask
                             with open(demo_json, 'w') as f:
                                 json.dump({**demo, 'timestamp': datetime.now().isoformat()},
                                           f, ensure_ascii=False, indent=2)
                             log.info(f"Patient : {demo.get('family_name')} {demo.get('given_name')} "
                                      f"ID={demo.get('patient_id')}")
+
 
             except socket.timeout:
                 pass
