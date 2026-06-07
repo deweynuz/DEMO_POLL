@@ -878,7 +878,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     poll_num      = 1
     last_nu_poll  = 0.0
     last_demo_poll = 0.0
-    last_wave_poll = 0.0
+    last_wave_poll = time.time() + 2.0  # délai initial avant premier poll wave
     # Accumulation des linked results (plusieurs paquets pour un même poll)
     pending       = {}   # invoke_id → dict valeurs accumulées
     pending_ts    = {}   # invoke_id → timestamp premier paquet
