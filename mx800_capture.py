@@ -579,7 +579,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.commit()
     return conn
 
-CSV_COLS_BASE = ['timestamp', 'patient_id', 'family_name', 'given_name']
+_COLS_BASE = ['timestamp', 'patient_id', 'family_name', 'given_name']
 
 def get_numeric_cols():
     """Retourne les colonnes numériques actives (depuis config)."""
@@ -916,8 +916,9 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
             )
             conn.commit()
         if csv_file:
-            csv_file.close()
-            csv_file = None
+           csv_file.close()
+           csv_file   = None
+           csv_writer = None  # ← ajouter cette ligne si absente
         if hdf5_writer:
             hdf5_writer.close()
             hdf5_writer = None
