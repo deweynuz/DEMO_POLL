@@ -1,0 +1,110 @@
+{
+  "_comment": "Configuration mx800_capture.py — modifier ce fichier puis redémarrer le service",
+  "_doc": "Pour ajouter un paramètre : ajouter une entrée dans 'parameters' et relancer le service",
+
+  "monitor_ip": "192.168.100.31",
+  "poll_interval": 1.0,
+  "demo_interval": 30,
+  "db_path": "/home/hegp/hegp.db",
+  "csv_dir": "/home/hegp/data/",
+  "demo_json": "/home/hegp/patient_demo.json",
+  "waves": false,
+  "hdf5_dir": "/home/hegp/waves/",
+
+  "parameters": {
+
+    "_section_cardio": "── Cardio-vasculaire ──────────────────────────────",
+    "0x4182": {"name": "HR",          "unit": "bpm",   "label": "Fréquence cardiaque",     "active": true},
+    "0x4BB8": {"name": "SpO2",        "unit": "%",     "label": "Saturation O2 (SpO2)",    "active": true},
+    "0x4822": {"name": "Pulse",       "unit": "bpm",   "label": "Pouls",                   "active": true},
+
+    "_section_abp": "── Pression artérielle invasive (ABP) ─────────────",
+    "0x4A15": {"name": "ABP_sys",     "unit": "mmHg",  "label": "ABP systolique",          "active": true},
+    "0x4A16": {"name": "ABP_dia",     "unit": "mmHg",  "label": "ABP diastolique",         "active": true},
+    "0x4A17": {"name": "ABP_mean",    "unit": "mmHg",  "label": "ABP moyenne",             "active": true},
+
+    "_section_art": "── Pression artérielle ART ────────────────────────",
+    "0x4A11": {"name": "ART_sys",     "unit": "mmHg",  "label": "ART systolique",          "active": true},
+    "0x4A12": {"name": "ART_dia",     "unit": "mmHg",  "label": "ART diastolique",         "active": true},
+    "0x4A13": {"name": "ART_mean",    "unit": "mmHg",  "label": "ART moyenne",             "active": true},
+
+    "_section_ao": "── Pression aortique ──────────────────────────────",
+    "0x4A0D": {"name": "Ao_sys",      "unit": "mmHg",  "label": "Ao systolique",           "active": true},
+    "0x4A0E": {"name": "Ao_dia",      "unit": "mmHg",  "label": "Ao diastolique",          "active": true},
+    "0x4A0F": {"name": "Ao_mean",     "unit": "mmHg",  "label": "Ao moyenne",              "active": true},
+
+    "_section_pap": "── Pression artérielle pulmonaire (PAP) ───────────",
+    "0x4A1D": {"name": "PAP_sys",     "unit": "mmHg",  "label": "PAP systolique",          "active": true},
+    "0x4A1E": {"name": "PAP_dia",     "unit": "mmHg",  "label": "PAP diastolique",         "active": true},
+    "0x4A1F": {"name": "PAP_mean",    "unit": "mmHg",  "label": "PAP moyenne",             "active": true},
+
+    "_section_cvp": "── Pression veineuse centrale (CVP) ───────────────",
+    "0x4A44": {"name": "CVP",         "unit": "mmHg",  "label": "CVP",                     "active": true},
+    "0x4A47": {"name": "CVP_mean",    "unit": "mmHg",  "label": "CVP moyenne",             "active": true},
+
+    "_section_nbp": "── Pression artérielle non invasive (NBP) ─────────",
+    "0x4A05": {"name": "NBP_sys",     "unit": "mmHg",  "label": "NBP systolique",          "active": true},
+    "0x4A06": {"name": "NBP_dia",     "unit": "mmHg",  "label": "NBP diastolique",         "active": true},
+    "0x4A07": {"name": "NBP_mean",    "unit": "mmHg",  "label": "NBP moyenne",             "active": true},
+
+    "_section_co": "── Débit cardiaque ────────────────────────────────",
+    "0x4B04": {"name": "CO",          "unit": "L/min", "label": "Débit cardiaque",         "active": true},
+    "0x4BDC": {"name": "CCO",         "unit": "L/min", "label": "Débit cardiaque continu", "active": true},
+    "0x490C": {"name": "CI",          "unit": "L/min/m2","label": "Index cardiaque",       "active": true},
+    "0xF047": {"name": "CCI",         "unit": "L/min/m2","label": "Index cardiaque continu","active": true},
+    "0x4B84": {"name": "SV",          "unit": "mL",    "label": "Volume d'éjection systolique","active": true},
+    "0xF048": {"name": "SI",          "unit": "mL/m2", "label": "Index d'éjection",        "active": true},
+    "0xF049": {"name": "SVV",         "unit": "%",     "label": "Variation VES",           "active": true},
+
+    "_section_sat": "── Saturations O2 ─────────────────────────────────",
+    "0x4B34": {"name": "SaO2",        "unit": "%",     "label": "Saturation O2 artérielle","active": true},
+    "0x4B3C": {"name": "SvO2",        "unit": "%",     "label": "Saturation O2 veineuse",  "active": true},
+    "0xF100": {"name": "ScvO2",       "unit": "%",     "label": "Sat O2 veineuse centrale","active": true},
+
+    "_section_temp": "── Températures ───────────────────────────────────",
+    "0x4B48": {"name": "Temp",        "unit": "°C",    "label": "Température (générique)", "active": true},
+    "0xE004": {"name": "Trect",       "unit": "°C",    "label": "Température rectale",     "active": true},
+    "0xE014": {"name": "Tblood",      "unit": "°C",    "label": "Température sanguine",    "active": true},
+    "0x4B60": {"name": "Tcore",       "unit": "°C",    "label": "Température centrale",    "active": true},
+    "0x4B74": {"name": "Tskin",       "unit": "°C",    "label": "Température cutanée",     "active": true},
+    "0x4B64": {"name": "Tesoph",      "unit": "°C",    "label": "Température oesophagienne","active": true},
+    "0x4B6C": {"name": "Tnaso",       "unit": "°C",    "label": "Température naso-pharyngée","active": true},
+    "0x4B50": {"name": "Tart",        "unit": "°C",    "label": "Température artérielle",  "active": true},
+    "0xF0C7": {"name": "T1",          "unit": "°C",    "label": "Température 1",           "active": true},
+    "0xF0C8": {"name": "T2",          "unit": "°C",    "label": "Température 2",           "active": true},
+
+    "_section_co2": "── CO2 / Respiratoire ─────────────────────────────",
+    "0x50AC": {"name": "CO2",         "unit": "mmHg",  "label": "CO2",                     "active": true},
+    "0x50B0": {"name": "EtCO2",       "unit": "mmHg",  "label": "EtCO2 end-tidal",         "active": true},
+    "0x50BA": {"name": "FiCO2",       "unit": "mmHg",  "label": "FiCO2 inspiré",           "active": true},
+    "0x5012": {"name": "RR",          "unit": "rpm",   "label": "Fréquence respiratoire",  "active": true},
+
+    "_section_bis": "── BIS / EEG ──────────────────────────────────────",
+    "0xF04E": {"name": "BIS",         "unit": "",      "label": "Bispectral Index",        "active": false},
+    "0xF04D": {"name": "BIS_SQI",     "unit": "%",     "label": "Signal Quality Index",    "active": false},
+    "0x593C": {"name": "EMG",         "unit": "dB",    "label": "Electromyographie",       "active": false},
+    "0xF04A": {"name": "SR",          "unit": "%",     "label": "Suppression Ratio",       "active": false},
+    "0x59B8": {"name": "TP",          "unit": "dB",    "label": "Total Power EEG",         "active": false},
+    "0x5988": {"name": "SEF",         "unit": "Hz",    "label": "Spectral Edge Frequency", "active": false},
+    "0xF840": {"name": "BSI",         "unit": "",      "label": "Burst Suppression Index", "active": false},
+
+    "_section_resist": "── Résistances vasculaires ─────────────────────",
+    "0x4B08": {"name": "SVR",         "unit": "dyn.s/cm5","label": "Résistances vasculaires systémiques","active": false},
+    "0x4B0C": {"name": "PVR",         "unit": "dyn.s/cm5","label": "Résistances vasculaires pulmonaires","active": false},
+    "0x4B10": {"name": "SVRI",        "unit": "dyn.s/cm5/m2","label": "Index SVR",        "active": false},
+    "0x4B14": {"name": "PVRI",        "unit": "dyn.s/cm5/m2","label": "Index PVR",        "active": false},
+
+    "_section_gaz": "── Gaz du sang / Biologie ─────────────────────────",
+    "0x7004": {"name": "pHa",         "unit": "",      "label": "pH artériel",             "active": false},
+    "0x7008": {"name": "PaCO2",       "unit": "mmHg",  "label": "PaCO2 artériel",          "active": false},
+    "0x700C": {"name": "PaO2",        "unit": "mmHg",  "label": "PaO2 artériel",           "active": false},
+    "0x7014": {"name": "Hb",          "unit": "g/dL",  "label": "Hémoglobine",             "active": false},
+
+    "_section_vent": "── Ventilation ────────────────────────────────────",
+    "0x5014": {"name": "MV",          "unit": "L/min", "label": "Ventilation minute",      "active": false},
+    "0x500C": {"name": "TV",          "unit": "mL",    "label": "Volume courant",          "active": false},
+    "0x5094": {"name": "Ppeak",       "unit": "cmH2O", "label": "Pression de crête",       "active": false},
+    "0x51A8": {"name": "PEEP",        "unit": "cmH2O", "label": "PEEP",                    "active": false},
+    "0x508C": {"name": "Cdyn",        "unit": "mL/cmH2O","label": "Compliance dynamique",  "active": false}
+  }
+}
