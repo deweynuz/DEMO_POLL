@@ -908,7 +908,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
         log.info(f"Session DB ouverte : id={session_id}")
 
     def close_session():
-        nonlocal session_id, csv_file, hdf5_writer
+        nonlocal session_id, csv_file, csv_writer, hdf5_writer
         if session_id:
             conn.execute(
                 "UPDATE sessions SET end_time=? WHERE id=?",
@@ -916,12 +916,13 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
             )
             conn.commit()
         if csv_file:
-           csv_file.close()
-           csv_file   = None
-           csv_writer = None  # ← ajouter cette ligne si absente
+            csv_file.close()
+        csv_file   = None
+        csv_writer = None
         if hdf5_writer:
             hdf5_writer.close()
             hdf5_writer = None
+        session_id = None
 
     send_assoc()
 
@@ -941,7 +942,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     last_demo_poll = 0.0
 
                 # ── MDS Create Event ──────────────────────────────────────
-                elif mtype == 'MDS_CREATE':
+                if mtype == 'MDS_CREATE' and not associated:
                     parsed = parse_mds_create(data)
                     if parsed:
                         invoke_id, managed_obj, event_time = parsed
