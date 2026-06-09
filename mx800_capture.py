@@ -591,24 +591,18 @@ def insert_numerics(conn, session_id, patient_db_id, ts, values: dict):
     all_cols = ['session_id', 'patient_db_id', 'timestamp'] + cols
     placeholders = ','.join(['?'] * len(all_cols))
     vals = [session_id, patient_db_id, ts] + [row[c] for c in cols]
-    try:
-        conn.execute(
-            f"INSERT INTO numerics ({','.join(all_cols)}) VALUES ({placeholders})",
-            vals
-        )
-        conn.commit()
-    except sqlite3.OperationalError as e:
-        # Colonne manquante → migration automatique
-        missing = str(e).split('"')[1] if '"' in str(e) else ''
-        if missing:
-            log.info(f"Migration DB : ajout colonne '{missing}'")
-            conn.execute(f"ALTER TABLE numerics ADD COLUMN {missing} REAL")
-            conn.commit()
-            conn.execute(
-                f"INSERT INTO numerics ({','.join(all_cols)}) VALUES ({placeholders})",
-                vals
-            )
-            conn.commit()
+    # Add any columns not yet in the schema before inserting
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(numerics)")}
+    for col in all_cols:
+        if col not in existing:
+            log.info(f"Migration DB : ajout colonne '{col}'")
+            conn.execute(f"ALTER TABLE numerics ADD COLUMN {col} REAL")
+    conn.commit()
+    conn.execute(
+        f"INSERT INTO numerics ({','.join(all_cols)}) VALUES ({placeholders})",
+        vals
+    )
+    conn.commit()
 
 def upsert_patient(conn, session_id, demo: dict) -> int:
     """Insère ou met à jour le patient, retourne son id DB."""
