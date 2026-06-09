@@ -650,7 +650,7 @@ def upsert_patient(conn, session_id, demo: dict) -> int:
 # CSV
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CSV_COLS = CSV_COLS_BASE  # colonnes de base — complétées dynamiquement au runtime
+CSV_COLS = _COLS_BASE  # colonnes de base — complétées dynamiquement au runtime
 
 def get_csv_writer(csv_dir: str, session_id: int, patient_id: str):
     """Retourne (file_handle, csv_writer) pour la session en cours."""
@@ -992,7 +992,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                             merged = pending.pop(invoke_id, {})
                             ts     = pending_ts.pop(invoke_id, datetime.now().isoformat())
                             pending_obj.pop(invoke_id, None)
-                             if merged and session_id:
+                            if merged and session_id:
                                 merged.update({
                                     'patient_id':  patient_info.get('patient_id', ''),
                                     'family_name': patient_info.get('family_name', ''),
