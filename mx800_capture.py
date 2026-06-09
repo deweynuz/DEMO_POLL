@@ -992,7 +992,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                             merged = pending.pop(invoke_id, {})
                             ts     = pending_ts.pop(invoke_id, datetime.now().isoformat())
                             pending_obj.pop(invoke_id, None)
-                            if merged:
+                             if merged and session_id:
                                 merged.update({
                                     'patient_id':  patient_info.get('patient_id', ''),
                                     'family_name': patient_info.get('family_name', ''),
@@ -1018,6 +1018,8 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                             if changed or csv_writer is None:
                                 if csv_file:
                                     csv_file.close()
+                                csv_file   = None
+                                csv_writer = None
                                 csv_file, csv_writer = get_csv_writer(
                                     csv_dir, session_id, demo.get('patient_id', 'unknown')
                                 )
