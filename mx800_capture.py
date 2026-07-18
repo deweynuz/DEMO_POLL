@@ -535,10 +535,31 @@ def init_db(db_path: str) -> sqlite3.Connection:
             end_time    TEXT
         )
     """)
+    # Une « intervention » regroupe TOUTES les données d'un même patient en
+    # cumulé, à travers les déconnexions/reconnexions réseau. Une nouvelle
+    # intervention démarre dès que le patient_id change (donc un patient qui
+    # revient après un autre patient = une nouvelle intervention). Une
+    # intervention peut couvrir plusieurs sessions ; start_session_id note
+    # seulement la session où elle a débuté.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interventions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_session_id INTEGER,
+            patient_id       TEXT,
+            family_name      TEXT,
+            given_name       TEXT,
+            sex              TEXT,
+            patient_type     TEXT,
+            start_time       TEXT,
+            end_time         TEXT,
+            FOREIGN KEY(start_session_id) REFERENCES sessions(id)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  INTEGER,
+            intervention_id INTEGER,
             patient_id  TEXT,
             family_name TEXT,
             given_name  TEXT,
@@ -546,13 +567,15 @@ def init_db(db_path: str) -> sqlite3.Connection:
             patient_type TEXT,
             demo_state  TEXT,
             admitted_at TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(intervention_id) REFERENCES interventions(id)
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS numerics (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  INTEGER,
+            intervention_id INTEGER,
             patient_db_id INTEGER,
             timestamp   TEXT,
             HR          REAL, SpO2       REAL, Pulse      REAL,
@@ -569,12 +592,26 @@ def init_db(db_path: str) -> sqlite3.Connection:
             Tcore       REAL, Tskin      REAL, Tesoph     REAL,
             Tnaso       REAL, Tart       REAL, T1         REAL, T2 REAL,
             EtCO2       REAL, FiCO2      REAL, RR         REAL,
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(intervention_id) REFERENCES interventions(id)
         )
     """)
+    # Migration des bases antérieures : garantit la colonne intervention_id
+    # en INTEGER AVANT de créer l'index qui la référence (sinon la migration
+    # générique de insert_numerics l'ajouterait en REAL et stockerait les id
+    # d'intervention en flottant).
+    for tbl in ('numerics', 'patients'):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})")}
+        if 'intervention_id' not in cols:
+            log.info(f"Migration DB : ajout colonne 'intervention_id' à {tbl}")
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN intervention_id INTEGER")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_numerics_ts
         ON numerics(session_id, timestamp)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_numerics_intervention
+        ON numerics(intervention_id, timestamp)
     """)
     conn.commit()
     return conn
@@ -582,15 +619,17 @@ def init_db(db_path: str) -> sqlite3.Connection:
 _COLS_BASE = ['timestamp', 'patient_id', 'family_name', 'given_name']
 
 def get_numeric_cols():
-    """Retourne les colonnes numériques actives (depuis config)."""
-    return NUMERIC_COLS_DYNAMIC if NUMERIC_COLS_DYNAMIC else NUMERIC_COLS
+    """Retourne les colonnes numériques actives (depuis config.json)."""
+    # NUMERIC_COLS_DYNAMIC vaut [] tant que load_config() n'a rien chargé ;
+    # on renvoie alors une liste vide plutôt qu'une variable inexistante.
+    return NUMERIC_COLS_DYNAMIC
 
-def insert_numerics(conn, session_id, patient_db_id, ts, values: dict):
+def insert_numerics(conn, session_id, intervention_id, patient_db_id, ts, values: dict):
     cols = get_numeric_cols()
     row  = {col: values.get(col) for col in cols}
-    all_cols = ['session_id', 'patient_db_id', 'timestamp'] + cols
+    all_cols = ['session_id', 'intervention_id', 'patient_db_id', 'timestamp'] + cols
     placeholders = ','.join(['?'] * len(all_cols))
-    vals = [session_id, patient_db_id, ts] + [row[c] for c in cols]
+    vals = [session_id, intervention_id, patient_db_id, ts] + [row[c] for c in cols]
     # Add any columns not yet in the schema before inserting
     existing = {row[1] for row in conn.execute("PRAGMA table_info(numerics)")}
     for col in all_cols:
@@ -604,18 +643,56 @@ def insert_numerics(conn, session_id, patient_db_id, ts, values: dict):
     )
     conn.commit()
 
-def upsert_patient(conn, session_id, demo: dict) -> int:
-    """Insère ou met à jour le patient, retourne son id DB."""
+def open_intervention(conn, start_session_id, demo: dict) -> int:
+    """
+    Ouvre une nouvelle intervention pour le patient courant et retourne son id.
+    Appelée au premier patient identifié et à chaque changement de patient_id.
+    """
+    cur = conn.execute("""
+        INSERT INTO interventions
+        (start_session_id, patient_id, family_name, given_name, sex, patient_type, start_time)
+        VALUES (?,?,?,?,?,?,?)
+    """, (
+        start_session_id,
+        demo.get('patient_id', ''),
+        demo.get('family_name', ''),
+        demo.get('given_name', ''),
+        demo.get('sex', ''),
+        demo.get('patient_type', ''),
+        datetime.now().isoformat()
+    ))
+    conn.commit()
+    iid = cur.lastrowid
+    log.info(f"Nouvelle intervention : id={iid} "
+             f"patient={demo.get('patient_id') or 'unknown'} "
+             f"({demo.get('family_name','')} {demo.get('given_name','')})")
+    return iid
+
+def close_intervention(conn, intervention_id):
+    """Horodate la fin d'une intervention (changement de patient ou arrêt)."""
+    if intervention_id:
+        conn.execute(
+            "UPDATE interventions SET end_time=? WHERE id=?",
+            (datetime.now().isoformat(), intervention_id)
+        )
+        conn.commit()
+
+def upsert_patient(conn, intervention_id, session_id, demo: dict) -> int:
+    """
+    Insère ou met à jour le patient de l'intervention en cours, retourne son id DB.
+    Une intervention = un patient : la ligne patients est unique par intervention.
+    """
     cur = conn.execute(
-        "SELECT id FROM patients WHERE session_id=? AND patient_id=?",
-        (session_id, demo.get('patient_id', ''))
+        "SELECT id FROM patients WHERE intervention_id=?",
+        (intervention_id,)
     )
     row = cur.fetchone()
     if row:
         conn.execute("""
-            UPDATE patients SET family_name=?, given_name=?, sex=?,
+            UPDATE patients SET session_id=?, family_name=?, given_name=?, sex=?,
             patient_type=?, demo_state=? WHERE id=?
         """, (
+            session_id,
             demo.get('family_name', ''), demo.get('given_name', ''),
             demo.get('sex', ''), demo.get('patient_type', ''),
             demo.get('demo_state', ''), row[0]
@@ -625,10 +702,11 @@ def upsert_patient(conn, session_id, demo: dict) -> int:
     else:
         cur = conn.execute("""
             INSERT INTO patients
-            (session_id, patient_id, family_name, given_name, sex, patient_type, demo_state, admitted_at)
-            VALUES (?,?,?,?,?,?,?,?)
+            (session_id, intervention_id, patient_id, family_name, given_name, sex, patient_type, demo_state, admitted_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (
             session_id,
+            intervention_id,
             demo.get('patient_id', ''),
             demo.get('family_name', ''),
             demo.get('given_name', ''),
@@ -646,16 +724,22 @@ def upsert_patient(conn, session_id, demo: dict) -> int:
 
 CSV_COLS = _COLS_BASE  # colonnes de base — complétées dynamiquement au runtime
 
-def get_csv_writer(csv_dir: str, session_id: int, patient_id: str):
-    """Retourne (file_handle, csv_writer) pour la session en cours."""
+def get_csv_writer(csv_dir: str, intervention_id: int, patient_id: str):
+    """
+    Retourne (file_handle, csv_writer) pour l'intervention en cours.
+    Le fichier est nommé par intervention et ouvert en append : les données
+    d'un même patient restent cumulées dans un seul CSV, même après une
+    reconnexion réseau. L'en-tête n'est écrit que si le fichier est neuf.
+    """
     Path(csv_dir).mkdir(parents=True, exist_ok=True)
-    date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    fname = f"session_{session_id}_{date_str}_{patient_id or 'unknown'}.csv"
+    fname = f"intervention_{intervention_id}_{patient_id or 'unknown'}.csv"
     fpath = os.path.join(csv_dir, fname)
-    f = open(fpath, 'w', newline='', encoding='utf-8')
-    fieldnames = CSV_COLS_BASE + get_numeric_cols()
+    is_new = (not os.path.exists(fpath)) or os.path.getsize(fpath) == 0
+    f = open(fpath, 'a', newline='', encoding='utf-8')
+    fieldnames = _COLS_BASE + get_numeric_cols()
     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-    writer.writeheader()
+    if is_new:
+        writer.writeheader()
     log.info(f"CSV ouvert : {fpath}")
     return f, writer
 
@@ -748,22 +832,24 @@ def parse_wave_poll_result(payload: bytes) -> dict:
 class HDF5Writer:
     """Écrit les waveforms dans un fichier HDF5 par session."""
 
-    def __init__(self, hdf5_dir: str, session_id: int, patient_id: str = 'unknown'):
+    def __init__(self, hdf5_dir: str, intervention_id: int, patient_id: str = 'unknown'):
         if not HDF5_AVAILABLE:
             raise RuntimeError("h5py non installé — lance : pip install h5py numpy --break-system-packages")
         Path(hdf5_dir).mkdir(parents=True, exist_ok=True)
-        date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        fname = f"session_{session_id}_{date_str}_{patient_id}.h5"
+        # Nommage par intervention + mode 'a' : les waveforms d'un même patient
+        # restent cumulées dans un seul fichier, même après une reconnexion.
+        fname = f"intervention_{intervention_id}_{patient_id}.h5"
         self.path = os.path.join(hdf5_dir, fname)
-        self.f = h5py.File(self.path, 'w')
-        self.f.attrs['session_id']  = session_id
+        self.f = h5py.File(self.path, 'a')
+        self.f.attrs['intervention_id'] = intervention_id
         self.f.attrs['patient_id']  = patient_id
-        self.f.attrs['created_at']  = datetime.now().isoformat()
+        if 'created_at' not in self.f.attrs:
+            self.f.attrs['created_at'] = datetime.now().isoformat()
         self.f.attrs['monitor_protocol'] = 'Philips IntelliVue Data Export UDP'
-        # Groupes
-        self.waves_grp = self.f.create_group('waves')
-        self.meta_grp  = self.f.create_group('patient')
-        self.ts_grp    = self.f.create_group('timestamps')
+        # Groupes (require_group : réutilise ceux déjà présents en mode append)
+        self.waves_grp = self.f.require_group('waves')
+        self.meta_grp  = self.f.require_group('patient')
+        self.ts_grp    = self.f.require_group('timestamps')
         # Buffers en mémoire (flush toutes les N trames)
         self._buffers  = {}   # canal → [samples]
         self._ts_buf   = {}   # canal → [timestamps]
@@ -871,6 +957,8 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     # État
     associated    = False
     session_id    = None
+    intervention_id    = None   # épisode patient courant (cumulé)
+    current_patient_id = None   # patient_id de l'intervention en cours
     patient_db_id = None
     patient_info  = {}
     csv_file      = None
@@ -992,7 +1080,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                                     'family_name': patient_info.get('family_name', ''),
                                     'given_name':  patient_info.get('given_name', ''),
                                 })
-                                insert_numerics(conn, session_id, patient_db_id, ts, merged)
+                                insert_numerics(conn, session_id, intervention_id, patient_db_id, ts, merged)
                                 if csv_writer:
                                     csv_writer.writerow({'timestamp': ts, **merged})
                                     csv_file.flush()
@@ -1006,22 +1094,32 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     elif obj_code == NOM_MOC_PT_DEMOG:
                         demo = values
                         if demo and demo.get('demo_state') == 'ADMITTED':
-                            changed = demo.get('patient_id') != patient_info.get('patient_id')
-                            patient_info  = demo
-                            patient_db_id = upsert_patient(conn, session_id, demo)
+                            # Nouvelle intervention si aucune en cours, ou si le
+                            # patient_id diffère de celui de l'intervention
+                            # courante. Un même patient (même après reconnexion)
+                            # reste dans la même intervention ; un patient qui
+                            # revient après un autre patient = nouvelle intervention.
+                            new_patient = demo.get('patient_id')
+                            changed = (intervention_id is None) or (new_patient != current_patient_id)
+                            patient_info = demo
+                            if changed:
+                                close_intervention(conn, intervention_id)
+                                intervention_id    = open_intervention(conn, session_id, demo)
+                                current_patient_id = new_patient
+                            patient_db_id = upsert_patient(conn, intervention_id, session_id, demo)
                             if changed or csv_writer is None:
                                 if csv_file:
                                     csv_file.close()
                                 csv_file   = None
                                 csv_writer = None
                                 csv_file, csv_writer = get_csv_writer(
-                                    csv_dir, session_id, demo.get('patient_id', 'unknown')
+                                    csv_dir, intervention_id, demo.get('patient_id', 'unknown')
                                 )
                             if waves and (changed or hdf5_writer is None):
                                 if hdf5_writer:
                                     hdf5_writer.close()
                                 hdf5_writer = HDF5Writer(
-                                    hdf5_dir, session_id, demo.get('patient_id', 'unknown')
+                                    hdf5_dir, intervention_id, demo.get('patient_id', 'unknown')
                                 )
                                 hdf5_writer.write_patient(demo)
                             with open(demo_json, 'w') as f:
@@ -1083,6 +1181,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
         log.info("Arrêt demandé...")
     finally:
         sock.sendto(RELEASE_REQ, (monitor_ip, MX800_DATA_PORT))
+        close_intervention(conn, intervention_id)
         close_session()
         sock.close()
         conn.close()
