@@ -18,6 +18,7 @@ import json
 import os
 import time
 import argparse
+import ipaddress
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -152,6 +153,10 @@ NUMERIC_COLS_DYNAMIC = []  # rempli au démarrage par load_config()
 # Ports
 MX800_DATA_PORT = 24105
 LOCAL_PORT      = 24106
+
+# Découverte automatique du moniteur
+DISCOVERY_ADDR  = '255.255.255.255'  # broadcast limité (atteint le segment L2 local)
+ASSOC_RETRY_SEC = 4                  # ré-émission de l'Association Request tant que non associé
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ASSOCIATION REQUEST (bytes PIPG p.298-305)
@@ -924,20 +929,21 @@ class HDF5Writer:
 def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
         poll_interval: float = 1.0, demo_interval: int = 30,
         waves: bool = False, hdf5_dir: str = '/home/hegp/waves/',
-        config_path: str = DEFAULT_CONFIG_PATH):
+        config_path: str = DEFAULT_CONFIG_PATH, discovery_cidr: str = ''):
 
     # Charge la config (PHYSIO_MAP + NUMERIC_COLS_DYNAMIC)
     cfg = load_config(config_path)
     # Les args CLI ont priorité sur config.json
     if cfg:
-        monitor_ip    = monitor_ip    or cfg.get('monitor_ip',    monitor_ip)
-        db_path       = db_path       or cfg.get('db_path',       db_path)
-        csv_dir       = csv_dir       or cfg.get('csv_dir',       csv_dir)
-        demo_json     = demo_json     or cfg.get('demo_json',     demo_json)
-        poll_interval = poll_interval or cfg.get('poll_interval', poll_interval)
-        demo_interval = demo_interval or cfg.get('demo_interval', demo_interval)
-        waves         = waves         or cfg.get('waves',         waves)
-        hdf5_dir      = hdf5_dir      or cfg.get('hdf5_dir',      hdf5_dir)
+        monitor_ip     = monitor_ip     or cfg.get('monitor_ip',     monitor_ip)
+        db_path        = db_path        or cfg.get('db_path',        db_path)
+        csv_dir        = csv_dir        or cfg.get('csv_dir',        csv_dir)
+        demo_json      = demo_json      or cfg.get('demo_json',      demo_json)
+        poll_interval  = poll_interval  or cfg.get('poll_interval',  poll_interval)
+        demo_interval  = demo_interval  or cfg.get('demo_interval',  demo_interval)
+        waves          = waves          or cfg.get('waves',          waves)
+        hdf5_dir       = hdf5_dir       or cfg.get('hdf5_dir',       hdf5_dir)
+        discovery_cidr = discovery_cidr or cfg.get('discovery_cidr', discovery_cidr)
 
     if waves and not HDF5_AVAILABLE:
         log.error("--waves nécessite h5py : pip install h5py numpy --break-system-packages")
@@ -946,13 +952,34 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     conn = init_db(db_path)
     log.info(f"Base SQLite : {db_path}")
 
+    # Découverte automatique si monitor_ip vaut "auto" ou est vide : on ne connaît
+    # pas encore l'IP du moniteur, on l'apprend du premier paquet qu'il renvoie.
+    auto_discover = (not monitor_ip) or str(monitor_ip).strip().lower() == 'auto'
+    if auto_discover:
+        monitor_ip = None
+    # Repli optionnel pour réseaux routés/VLAN : balayage d'une plage CIDR.
+    discovery_hosts = []
+    if auto_discover and discovery_cidr:
+        try:
+            net = ipaddress.ip_network(str(discovery_cidr), strict=False)
+            discovery_hosts = [str(h) for h in net.hosts()]
+        except ValueError as e:
+            log.warning(f"discovery_cidr invalide ({discovery_cidr}) : {e}")
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(3.0)
+    if auto_discover:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         sock.bind(('', LOCAL_PORT))
     except OSError:
         sock.bind(('', 0))
-    log.info(f"Socket : {sock.getsockname()} → {monitor_ip}:{MX800_DATA_PORT}")
+    if auto_discover:
+        scan = f" + scan {len(discovery_hosts)} IP" if discovery_hosts else ""
+        log.info(f"Socket : {sock.getsockname()} → découverte automatique du moniteur "
+                 f"(broadcast{scan})")
+    else:
+        log.info(f"Socket : {sock.getsockname()} → {monitor_ip}:{MX800_DATA_PORT}")
 
     # État
     associated    = False
@@ -968,16 +995,30 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     last_nu_poll  = 0.0
     last_demo_poll = 0.0
     last_wave_poll = 0.0
+    last_assoc_send = 0.0
     # Accumulation des linked results (plusieurs paquets pour un même poll)
     pending       = {}   # invoke_id → dict valeurs accumulées
     pending_ts    = {}   # invoke_id → timestamp premier paquet
     pending_obj   = {}   # invoke_id → obj_code
 
     def send_assoc():
-        nonlocal associated
-        log.info(f"Envoi Association Request {'(avec waveforms)' if waves else ''}...")
-        sock.sendto(build_assoc_request(waves), (monitor_ip, MX800_DATA_PORT))
+        nonlocal associated, last_assoc_send
+        if monitor_ip:
+            sock.sendto(build_assoc_request(waves), (monitor_ip, MX800_DATA_PORT))
+            log.info(f"Envoi Association Request → {monitor_ip} "
+                     f"{'(avec waveforms)' if waves else ''}")
+        else:
+            # Découverte : broadcast sur le segment (+ balayage CIDR optionnel)
+            pkt = build_assoc_request(waves)
+            for target in (DISCOVERY_ADDR, *discovery_hosts):
+                try:
+                    sock.sendto(pkt, (target, MX800_DATA_PORT))
+                except OSError:
+                    pass
+            scan = f" + scan {len(discovery_hosts)} IP" if discovery_hosts else ""
+            log.info(f"Recherche du moniteur (broadcast{scan})...")
         associated = False
+        last_assoc_send = time.time()
 
     def open_session():
         nonlocal session_id
@@ -1015,8 +1056,18 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                 mtype = detect_message_type(data)
                 log.debug(f"Reçu {len(data)}o [{mtype}] de {addr}")
 
+                # ── Découverte : adopte l'IP du 1er moniteur qui répond ───
+                # Verrouillé une fois associé : si plusieurs moniteurs répondent
+                # sur le segment, on ne bascule pas de l'un à l'autre.
+                if auto_discover and not associated and monitor_ip != addr[0] \
+                        and mtype in ('ASSOC_RESPONSE', 'MDS_CREATE'):
+                    monitor_ip = addr[0]
+                    log.info(f"Moniteur découvert à l'adresse {monitor_ip}")
+
                 # ── Association Response ──────────────────────────────────
-                if mtype == 'ASSOC_RESPONSE':
+                # Ignore les réponses en double (retransmissions, multi-NIC) :
+                # on n'ouvre pas de nouvelle session tant qu'on est déjà associé.
+                if mtype == 'ASSOC_RESPONSE' and not associated:
                     log.info("Association établie.")
                     associated = True
                     open_session()
@@ -1047,6 +1098,8 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     associated = False
                     close_session()
                     session_id = None
+                    if auto_discover:
+                        monitor_ip = None   # ré-apprend l'IP au prochain send_assoc
                     time.sleep(10)
                     send_assoc()
 
@@ -1145,6 +1198,10 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                 log.error(f"Erreur réception : {e}")
 
             if not associated:
+                # Relance périodiquement l'Association Request (découverte ou
+                # simple reconnexion) tant que le moniteur n'a pas répondu.
+                if time.time() - last_assoc_send >= ASSOC_RETRY_SEC:
+                    send_assoc()
                 continue
 
             now = time.time()
@@ -1180,7 +1237,11 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     except KeyboardInterrupt:
         log.info("Arrêt demandé...")
     finally:
-        sock.sendto(RELEASE_REQ, (monitor_ip, MX800_DATA_PORT))
+        if monitor_ip:
+            try:
+                sock.sendto(RELEASE_REQ, (monitor_ip, MX800_DATA_PORT))
+            except OSError:
+                pass
         close_intervention(conn, intervention_id)
         close_session()
         sock.close()
@@ -1197,7 +1258,11 @@ if __name__ == '__main__':
     parser.add_argument('--config',  default=DEFAULT_CONFIG_PATH,
                         help=f'Fichier de configuration JSON (défaut: {DEFAULT_CONFIG_PATH})')
     parser.add_argument('--ip',      default='',
-                        help='IP du moniteur (défaut: depuis config.json)')
+                        help='IP du moniteur, ou "auto" pour la découverte automatique '
+                             '(défaut: depuis config.json ; vide ou "auto" = découverte)')
+    parser.add_argument('--discover-cidr', default='',
+                        help='Plage CIDR à balayer en découverte si le broadcast ne '
+                             'suffit pas (ex. 192.168.1.0/24 ; réseaux routés/VLAN)')
     parser.add_argument('--db',      default='',
                         help='Chemin base SQLite (défaut: depuis config.json)')
     parser.add_argument('--csv',     default='',
@@ -1219,13 +1284,14 @@ if __name__ == '__main__':
         log.setLevel(logging.DEBUG)
 
     run(
-        monitor_ip    = args.ip      or '192.168.100.31',
-        db_path       = args.db      or '/home/hegp/hegp.db',
-        csv_dir       = args.csv     or '/home/hegp/data/',
-        demo_json     = args.json    or '/home/hegp/patient_demo.json',
-        poll_interval = args.interval or 1.0,
-        demo_interval = args.demo_interval or 30,
-        waves         = args.waves,
-        hdf5_dir      = args.hdf5    or '/home/hegp/waves/',
-        config_path   = args.config,
+        monitor_ip     = args.ip,   # vide ou "auto" → découverte automatique
+        db_path        = args.db      or '/home/hegp/hegp.db',
+        csv_dir        = args.csv     or '/home/hegp/data/',
+        demo_json      = args.json    or '/home/hegp/patient_demo.json',
+        poll_interval  = args.interval or 1.0,
+        demo_interval  = args.demo_interval or 30,
+        waves          = args.waves,
+        hdf5_dir       = args.hdf5    or '/home/hegp/waves/',
+        config_path    = args.config,
+        discovery_cidr = args.discover_cidr,
     )

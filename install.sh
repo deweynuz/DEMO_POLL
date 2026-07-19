@@ -55,9 +55,10 @@ step "Configuration"
 
 echo ""
 echo -e "${BOLD}IP du moniteur Philips MX800 ?${NC}"
-echo -e "  Exemple : 192.168.100.31"
-read -p "  IP moniteur [192.168.100.31] : " MONITOR_IP
-MONITOR_IP=${MONITOR_IP:-192.168.100.31}
+echo -e "  Tapez l'IP (ex. 192.168.100.31), ou 'auto' pour la découverte automatique"
+echo -e "  (broadcast sur le réseau — le moniteur doit être sur le même sous-réseau)."
+read -p "  IP moniteur [auto] : " MONITOR_IP
+MONITOR_IP=${MONITOR_IP:-auto}
 
 echo ""
 echo -e "${BOLD}Dossier d'installation ?${NC}"
@@ -163,7 +164,17 @@ ok "Service mx800capture.service créé et activé"
 # ── Test de connectivité réseau ───────────────────────────────────────────────
 step "Test de connectivité"
 
-if ping -c 1 -W 2 "$MONITOR_IP" &>/dev/null; then
+if [ "$MONITOR_IP" = "auto" ]; then
+    info "Mode découverte automatique : le service cherchera le moniteur par broadcast."
+    info "Démarrage du service..."
+    sudo systemctl start mx800capture.service
+    sleep 3
+    if sudo systemctl is-active --quiet mx800capture.service; then
+        ok "Service démarré (découverte du moniteur en cours)"
+    else
+        warn "Service démarré mais vérifiez les logs : journalctl -u mx800capture.service -f"
+    fi
+elif ping -c 1 -W 2 "$MONITOR_IP" &>/dev/null; then
     ok "Moniteur $MONITOR_IP accessible"
     info "Démarrage du service..."
     sudo systemctl start mx800capture.service

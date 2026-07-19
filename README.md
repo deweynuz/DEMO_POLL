@@ -121,7 +121,8 @@ Toute la configuration se fait dans `config.json`. Après modification,
 
 | Clé             | Défaut                          | Description                                   |
 |-----------------|---------------------------------|-----------------------------------------------|
-| `monitor_ip`    | `192.168.100.31`                | IP du moniteur MX800                           |
+| `monitor_ip`    | `192.168.100.31`                | IP du moniteur, ou `"auto"` / `""` pour la [découverte automatique](#découverte-automatique-de-lip-du-moniteur) |
+| `discovery_cidr`| `""`                            | Plage CIDR à balayer en découverte si le broadcast ne suffit pas (réseaux routés) |
 | `poll_interval` | `1.0`                           | Intervalle d'interrogation des numériques (s)  |
 | `demo_interval` | `30`                            | Intervalle d'interrogation des démographies (s)|
 | `db_path`       | `/home/hegp/hegp.db`            | Chemin de la base SQLite                       |
@@ -148,6 +149,58 @@ Le bloc `parameters` associe chaque **identifiant physiologique Philips**
 Pour **activer un paramètre**, passez son `active` à `true` et redémarrez le
 service. La colonne SQL correspondante est créée automatiquement (migration à
 chaud, voir plus bas).
+
+---
+
+## Découverte automatique de l'IP du moniteur
+
+Pour déployer le système **sans connaître ni configurer l'IP** du moniteur (par
+exemple le même Raspberry Pi réutilisé sur n'importe quel site), mettez :
+
+```json
+"monitor_ip": "auto"
+```
+
+(ou laissez le champ vide, ou lancez avec `--ip auto`).
+
+### Comment ça marche
+
+Le protocole étant en **UDP sans connexion**, le script :
+
+1. envoie l'*Association Request* en **broadcast** (`255.255.255.255:24105`) sur
+   le segment réseau, en la ré-émettant toutes les ~4 s tant qu'aucun moniteur
+   n'a répondu ;
+2. **adopte l'IP** du premier moniteur qui répond (`ASSOC_RESPONSE` /
+   `MDS_CREATE`) puis passe en **unicast** pour toute la suite ;
+3. si la connexion tombe (`ABORT`), il **ré-apprend** l'IP automatiquement (utile
+   si le moniteur est remplacé ou si son IP DHCP change).
+
+Si plusieurs moniteurs répondent sur le segment, le **premier** est verrouillé
+(un Pi = un moniteur).
+
+### Limite & réseaux routés
+
+Le **broadcast ne traverse pas les routeurs/VLAN**. La découverte fonctionne donc
+en *plug-and-play* tant que le Pi est sur le **même sous-réseau** que le moniteur.
+Si le Pi peut être sur un sous-réseau **routé différent**, indiquez une plage à
+balayer en complément :
+
+```json
+"monitor_ip": "auto",
+"discovery_cidr": "192.168.10.0/24"
+```
+
+ou en ligne de commande :
+
+```bash
+python3 mx800_capture.py --ip auto --discover-cidr 192.168.10.0/24
+```
+
+Le script enverra alors l'Association Request en broadcast **et** en unicast à
+chaque hôte de la plage, jusqu'à obtenir une réponse.
+
+> Une **IP fixe** reste évidemment possible (`"monitor_ip": "192.168.100.31"`) —
+> c'est le comportement historique, sans broadcast.
 
 ---
 
@@ -178,7 +231,8 @@ python3 mx800_capture.py --config config.json --debug      # logs détaillés
 | Argument          | Défaut                | Description                                          |
 |-------------------|-----------------------|------------------------------------------------------|
 | `--config`        | `/home/hegp/config.json` | Fichier de configuration JSON                      |
-| `--ip`            | *(config.json)*       | IP du moniteur                                        |
+| `--ip`            | *(config.json)*       | IP du moniteur, ou `auto` pour la découverte automatique |
+| `--discover-cidr` | *(config.json)*       | Plage CIDR à balayer en découverte (ex. `192.168.1.0/24`) |
 | `--db`            | *(config.json)*       | Chemin de la base SQLite                             |
 | `--csv`           | *(config.json)*       | Dossier CSV                                          |
 | `--json`          | *(config.json)*       | Fichier JSON des démographies                        |
