@@ -112,87 +112,21 @@ step "Installation des fichiers"
 cp "$REPO_DIR/mx800_capture.py" "$INSTALL_DIR/mx800_capture.py"
 ok "mx800_capture.py installé"
 
-# Crée config.json avec l'IP saisie
-cat > "$INSTALL_DIR/config.json" << CONFIGEOF
-{
-  "_comment": "Configuration mx800_capture.py — modifier ce fichier puis redémarrer le service",
-  "_doc": "Pour ajouter un paramètre : active: false → active: true puis redémarrer le service",
-
-  "monitor_ip": "$MONITOR_IP",
-  "poll_interval": 1.0,
-  "demo_interval": 30,
-  "db_path": "$INSTALL_DIR/hegp.db",
-  "csv_dir": "$INSTALL_DIR/data/",
-  "demo_json": "$INSTALL_DIR/patient_demo.json",
-  "waves": false,
-  "hdf5_dir": "$INSTALL_DIR/waves/",
-
-  "parameters": {
-
-    "_section_cardio": "── Cardio-vasculaire ──────────────────────────────",
-    "0x4182": {"name": "HR",          "unit": "bpm",   "label": "Fréquence cardiaque",     "active": true},
-    "0x4BB8": {"name": "SpO2",        "unit": "%",     "label": "Saturation O2 (SpO2)",    "active": true},
-    "0x4822": {"name": "Pulse",       "unit": "bpm",   "label": "Pouls",                   "active": true},
-
-    "_section_abp": "── Pression artérielle invasive (ABP) ─────────────",
-    "0x4A15": {"name": "ABP_sys",     "unit": "mmHg",  "label": "ABP systolique",          "active": true},
-    "0x4A16": {"name": "ABP_dia",     "unit": "mmHg",  "label": "ABP diastolique",         "active": true},
-    "0x4A17": {"name": "ABP_mean",    "unit": "mmHg",  "label": "ABP moyenne",             "active": true},
-
-    "_section_art": "── Pression artérielle ART ────────────────────────",
-    "0x4A11": {"name": "ART_sys",     "unit": "mmHg",  "label": "ART systolique",          "active": true},
-    "0x4A12": {"name": "ART_dia",     "unit": "mmHg",  "label": "ART diastolique",         "active": true},
-    "0x4A13": {"name": "ART_mean",    "unit": "mmHg",  "label": "ART moyenne",             "active": true},
-
-    "_section_pap": "── Pression artérielle pulmonaire (PAP) ───────────",
-    "0x4A1D": {"name": "PAP_sys",     "unit": "mmHg",  "label": "PAP systolique",          "active": true},
-    "0x4A1E": {"name": "PAP_dia",     "unit": "mmHg",  "label": "PAP diastolique",         "active": true},
-    "0x4A1F": {"name": "PAP_mean",    "unit": "mmHg",  "label": "PAP moyenne",             "active": true},
-
-    "_section_cvp": "── Pression veineuse centrale (CVP) ───────────────",
-    "0x4A44": {"name": "CVP",         "unit": "mmHg",  "label": "CVP",                     "active": true},
-    "0x4A47": {"name": "CVP_mean",    "unit": "mmHg",  "label": "CVP moyenne",             "active": true},
-
-    "_section_nbp": "── Pression artérielle non invasive (NBP) ─────────",
-    "0x4A05": {"name": "NBP_sys",     "unit": "mmHg",  "label": "NBP systolique",          "active": true},
-    "0x4A06": {"name": "NBP_dia",     "unit": "mmHg",  "label": "NBP diastolique",         "active": true},
-    "0x4A07": {"name": "NBP_mean",    "unit": "mmHg",  "label": "NBP moyenne",             "active": true},
-
-    "_section_co": "── Débit cardiaque ────────────────────────────────",
-    "0x4B04": {"name": "CO",          "unit": "L/min", "label": "Débit cardiaque",         "active": true},
-    "0x4BDC": {"name": "CCO",         "unit": "L/min", "label": "Débit cardiaque continu", "active": true},
-    "0x490C": {"name": "CI",          "unit": "L/min/m2","label": "Index cardiaque",       "active": true},
-    "0x4B84": {"name": "SV",          "unit": "mL",    "label": "Volume éjection systolique","active": true},
-    "0xF049": {"name": "SVV",         "unit": "%",     "label": "Variation VES",           "active": true},
-
-    "_section_sat": "── Saturations O2 ─────────────────────────────────",
-    "0x4B34": {"name": "SaO2",        "unit": "%",     "label": "Saturation O2 artérielle","active": true},
-    "0x4B3C": {"name": "SvO2",        "unit": "%",     "label": "Saturation O2 veineuse",  "active": true},
-    "0xF100": {"name": "ScvO2",       "unit": "%",     "label": "Sat O2 veineuse centrale","active": true},
-
-    "_section_temp": "── Températures ───────────────────────────────────",
-    "0x4B48": {"name": "Temp",        "unit": "°C",    "label": "Température générique",   "active": true},
-    "0xE014": {"name": "Tblood",      "unit": "°C",    "label": "Température sanguine",    "active": true},
-    "0x4B60": {"name": "Tcore",       "unit": "°C",    "label": "Température centrale",    "active": true},
-    "0x4B74": {"name": "Tskin",       "unit": "°C",    "label": "Température cutanée",     "active": true},
-    "0x4B64": {"name": "Tesoph",      "unit": "°C",    "label": "Température oesophagienne","active": true},
-    "0x4B6C": {"name": "Tnaso",       "unit": "°C",    "label": "Température naso-pharyngée","active": true},
-    "0xF0C7": {"name": "T1",          "unit": "°C",    "label": "Température 1",           "active": true},
-    "0xF0C8": {"name": "T2",          "unit": "°C",    "label": "Température 2",           "active": true},
-
-    "_section_co2": "── CO2 / Respiratoire ─────────────────────────────",
-    "0x50B0": {"name": "EtCO2",       "unit": "mmHg",  "label": "EtCO2 end-tidal",         "active": true},
-    "0x50BA": {"name": "FiCO2",       "unit": "mmHg",  "label": "FiCO2 inspiré",           "active": true},
-    "0x5012": {"name": "RR",          "unit": "rpm",   "label": "Fréquence respiratoire",  "active": true},
-
-    "_section_bis": "── BIS / EEG ──────────────────────────────────────",
-    "0xF04E": {"name": "BIS",         "unit": "",      "label": "Bispectral Index",        "active": false},
-    "0xF04D": {"name": "BIS_SQI",     "unit": "%",     "label": "Signal Quality Index",    "active": false},
-    "0x593C": {"name": "EMG",         "unit": "dB",    "label": "Electromyographie",       "active": false},
-    "0xF04A": {"name": "SR",          "unit": "%",     "label": "Suppression Ratio",       "active": false}
-  }
-}
-CONFIGEOF
+# Génère config.json à partir de celui du dépôt (source unique de vérité pour
+# la liste des paramètres) en y injectant l'IP et les chemins d'installation.
+python3 - "$REPO_DIR/config.json" "$INSTALL_DIR/config.json" "$MONITOR_IP" "$INSTALL_DIR" << 'PYEOF'
+import json, sys
+src, dst, ip, install_dir = sys.argv[1:5]
+with open(src, encoding='utf-8') as f:
+    cfg = json.load(f)
+cfg['monitor_ip'] = ip
+cfg['db_path']    = f"{install_dir}/hegp.db"
+cfg['csv_dir']    = f"{install_dir}/data/"
+cfg['demo_json']  = f"{install_dir}/patient_demo.json"
+cfg['hdf5_dir']   = f"{install_dir}/waves/"
+with open(dst, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PYEOF
 ok "config.json créé avec IP=$MONITOR_IP"
 
 # ── Création des dossiers ─────────────────────────────────────────────────────
@@ -255,7 +189,7 @@ echo -e "${BOLD}Fichiers installés :${NC}"
 echo "  $INSTALL_DIR/mx800_capture.py"
 echo "  $INSTALL_DIR/config.json"
 echo "  $INSTALL_DIR/hegp.db       (créé au premier démarrage)"
-echo "  $INSTALL_DIR/data/         (CSV par session)"
+echo "  $INSTALL_DIR/data/         (CSV par intervention)"
 echo ""
 echo -e "${BOLD}Commandes utiles :${NC}"
 echo "  sudo systemctl status mx800capture.service"
@@ -266,7 +200,7 @@ echo -e "${BOLD}Changer l'IP du moniteur :${NC}"
 echo "  nano $INSTALL_DIR/config.json"
 echo "  sudo systemctl restart mx800capture.service"
 echo ""
-echo -e "${BOLD}Activer le BIS :${NC}"
-echo "  nano $INSTALL_DIR/config.json  →  BIS: \"active\": true"
+echo -e "${BOLD}Activer un paramètre optionnel (ex. ventilation, gaz du sang) :${NC}"
+echo "  nano $INSTALL_DIR/config.json  →  passer \"active\": false à true"
 echo "  sudo systemctl restart mx800capture.service"
 echo ""
