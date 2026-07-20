@@ -54,11 +54,26 @@ ok "Git disponible"
 step "Configuration"
 
 echo ""
-echo -e "${BOLD}IP du moniteur Philips MX800 ?${NC}"
-echo -e "  Tapez l'IP (ex. 192.168.100.31), ou 'auto' pour la découverte automatique"
-echo -e "  (broadcast sur le réseau — le moniteur doit être sur le même sous-réseau)."
-read -p "  IP moniteur [auto] : " MONITOR_IP
-MONITOR_IP=${MONITOR_IP:-auto}
+echo -e "${BOLD}Type de raccordement au moniteur ?${NC}"
+echo -e "  1) ${BOLD}Direct (plug-and-play)${NC} — câble Ethernet Pi ↔ moniteur."
+echo -e "     Le Pi configure le réseau (IP fixe + serveur DHCP/BOOTP) et découvre"
+echo -e "     le moniteur tout seul. Recommandé."
+echo -e "  2) ${BOLD}Réseau existant${NC} — le moniteur a déjà une IP sur un réseau."
+read -p "  Choix [1] : " NET_CHOICE
+NET_CHOICE=${NET_CHOICE:-1}
+
+if [ "$NET_CHOICE" = "2" ]; then
+    NET_MODE="network"
+    echo ""
+    echo -e "${BOLD}IP du moniteur ?${NC} (ou 'auto' pour la découverte par broadcast)"
+    read -p "  IP moniteur [auto] : " MONITOR_IP
+    MONITOR_IP=${MONITOR_IP:-auto}
+    DISCOVERY_CIDR=""
+else
+    NET_MODE="direct"
+    MONITOR_IP="auto"
+    DISCOVERY_CIDR="192.168.100.0/24"
+fi
 
 echo ""
 echo -e "${BOLD}Dossier d'installation ?${NC}"
@@ -68,6 +83,7 @@ INSTALL_DIR=${INSTALL_DIR:-/home/$USER}
 echo ""
 echo -e "${BOLD}Récapitulatif :${NC}"
 echo "  Utilisateur    : $USER"
+echo "  Raccordement   : $([ "$NET_MODE" = "direct" ] && echo 'Direct (plug-and-play, DHCP/BOOTP)' || echo 'Réseau existant')"
 echo "  IP moniteur    : $MONITOR_IP"
 echo "  Dossier        : $INSTALL_DIR"
 echo "  Repository     : https://github.com/deweynuz/DEMO_POLL"
@@ -115,12 +131,13 @@ ok "mx800_capture.py installé"
 
 # Génère config.json à partir de celui du dépôt (source unique de vérité pour
 # la liste des paramètres) en y injectant l'IP et les chemins d'installation.
-python3 - "$REPO_DIR/config.json" "$INSTALL_DIR/config.json" "$MONITOR_IP" "$INSTALL_DIR" << 'PYEOF'
+python3 - "$REPO_DIR/config.json" "$INSTALL_DIR/config.json" "$MONITOR_IP" "$INSTALL_DIR" "$DISCOVERY_CIDR" << 'PYEOF'
 import json, sys
-src, dst, ip, install_dir = sys.argv[1:5]
+src, dst, ip, install_dir, cidr = sys.argv[1:6]
 with open(src, encoding='utf-8') as f:
     cfg = json.load(f)
-cfg['monitor_ip'] = ip
+cfg['monitor_ip']     = ip
+cfg['discovery_cidr'] = cidr
 cfg['db_path']    = f"{install_dir}/hegp.db"
 cfg['csv_dir']    = f"{install_dir}/data/"
 cfg['demo_json']  = f"{install_dir}/patient_demo.json"
@@ -128,12 +145,55 @@ cfg['hdf5_dir']   = f"{install_dir}/waves/"
 with open(dst, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 PYEOF
-ok "config.json créé avec IP=$MONITOR_IP"
+ok "config.json créé (monitor_ip=$MONITOR_IP, discovery_cidr='${DISCOVERY_CIDR:-—}')"
 
 # ── Création des dossiers ─────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR/data"
 mkdir -p "$INSTALL_DIR/waves"
 ok "Dossiers data/ et waves/ créés"
+
+# ── Configuration réseau (mode direct plug-and-play) ──────────────────────────
+# Le moniteur Philips est en BOOTP et attend une IP. En liaison directe, le Pi
+# joue le serveur : IP fixe sur eth0 + DHCP/BOOTP. Le moniteur reçoit alors une
+# IP dans la plage, et la capture le découvre par scan unicast (port 24105).
+if [ "$NET_MODE" = "direct" ]; then
+    step "Configuration réseau (liaison directe)"
+    LAN_IP="192.168.100.1"
+
+    sudo apt-get install -y dnsmasq -q && ok "dnsmasq installé"
+
+    # eth0 en IP statique permanente
+    if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
+        sudo nmcli con delete mx800-eth0 &>/dev/null || true
+        sudo nmcli con add type ethernet ifname eth0 con-name mx800-eth0 \
+            ipv4.method manual ipv4.addresses "${LAN_IP}/24" ipv6.method ignore &>/dev/null
+        sudo nmcli con up mx800-eth0 &>/dev/null || true
+        ok "eth0 en statique ${LAN_IP}/24 (NetworkManager)"
+    else
+        if ! grep -q "mx800-eth0" /etc/dhcpcd.conf 2>/dev/null; then
+            printf '\n# mx800-eth0\ninterface eth0\nstatic ip_address=%s/24\n' "$LAN_IP" | sudo tee -a /etc/dhcpcd.conf >/dev/null
+        fi
+        sudo ip addr add "${LAN_IP}/24" dev eth0 2>/dev/null || true
+        sudo ip link set eth0 up
+        ok "eth0 en statique ${LAN_IP}/24 (dhcpcd)"
+    fi
+
+    # Serveur DHCP/BOOTP sur eth0 uniquement
+    sudo tee /etc/dnsmasq.d/mx800.conf >/dev/null <<'DNSEOF'
+port=0
+interface=eth0
+bind-interfaces
+dhcp-authoritative
+dhcp-range=192.168.100.50,192.168.100.150,255.255.255.0,12h
+# Le moniteur Philips émet en BOOTP : dnsmasq n'alloue en BOOTP qu'en présence
+# d'au moins un dhcp-host. Cette entrée « déclencheur » active l'allocation
+# BOOTP dynamique pour tout moniteur, quel que soit son adresse MAC.
+dhcp-host=00:00:00:00:00:01,192.168.100.199
+DNSEOF
+    sudo systemctl enable dnsmasq &>/dev/null
+    sudo systemctl restart dnsmasq
+    ok "Serveur DHCP/BOOTP actif sur eth0 (plage 192.168.100.50-150)"
+fi
 
 # ── Service systemd ───────────────────────────────────────────────────────────
 step "Service systemd"
@@ -165,7 +225,12 @@ ok "Service mx800capture.service créé et activé"
 step "Test de connectivité"
 
 if [ "$MONITOR_IP" = "auto" ]; then
-    info "Mode découverte automatique : le service cherchera le moniteur par broadcast."
+    if [ "$NET_MODE" = "direct" ]; then
+        info "Mode direct : le moniteur va recevoir une IP (DHCP/BOOTP), puis la capture"
+        info "le découvre par scan sur 192.168.100.0/24. Cela peut prendre 1-2 minutes."
+    else
+        info "Mode découverte automatique : recherche du moniteur par broadcast."
+    fi
     info "Démarrage du service..."
     sudo systemctl start mx800capture.service
     sleep 3
