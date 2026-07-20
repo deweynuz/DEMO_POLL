@@ -54,10 +54,26 @@ ok "Git disponible"
 step "Configuration"
 
 echo ""
-echo -e "${BOLD}IP du moniteur Philips MX800 ?${NC}"
-echo -e "  Exemple : 192.168.100.31"
-read -p "  IP moniteur [192.168.100.31] : " MONITOR_IP
-MONITOR_IP=${MONITOR_IP:-192.168.100.31}
+echo -e "${BOLD}Type de raccordement au moniteur ?${NC}"
+echo -e "  1) ${BOLD}Direct (plug-and-play)${NC} — câble Ethernet Pi ↔ moniteur."
+echo -e "     Le Pi configure le réseau (IP fixe + serveur DHCP/BOOTP) et découvre"
+echo -e "     le moniteur tout seul. Recommandé."
+echo -e "  2) ${BOLD}Réseau existant${NC} — le moniteur a déjà une IP sur un réseau."
+read -p "  Choix [1] : " NET_CHOICE
+NET_CHOICE=${NET_CHOICE:-1}
+
+if [ "$NET_CHOICE" = "2" ]; then
+    NET_MODE="network"
+    echo ""
+    echo -e "${BOLD}IP du moniteur ?${NC} (ou 'auto' pour la découverte par broadcast)"
+    read -p "  IP moniteur [auto] : " MONITOR_IP
+    MONITOR_IP=${MONITOR_IP:-auto}
+    DISCOVERY_CIDR=""
+else
+    NET_MODE="direct"
+    MONITOR_IP="auto"
+    DISCOVERY_CIDR="192.168.100.0/24"
+fi
 
 echo ""
 echo -e "${BOLD}Dossier d'installation ?${NC}"
@@ -67,6 +83,7 @@ INSTALL_DIR=${INSTALL_DIR:-/home/$USER}
 echo ""
 echo -e "${BOLD}Récapitulatif :${NC}"
 echo "  Utilisateur    : $USER"
+echo "  Raccordement   : $([ "$NET_MODE" = "direct" ] && echo 'Direct (plug-and-play, DHCP/BOOTP)' || echo 'Réseau existant')"
 echo "  IP moniteur    : $MONITOR_IP"
 echo "  Dossier        : $INSTALL_DIR"
 echo "  Repository     : https://github.com/deweynuz/DEMO_POLL"
@@ -112,93 +129,71 @@ step "Installation des fichiers"
 cp "$REPO_DIR/mx800_capture.py" "$INSTALL_DIR/mx800_capture.py"
 ok "mx800_capture.py installé"
 
-# Crée config.json avec l'IP saisie
-cat > "$INSTALL_DIR/config.json" << CONFIGEOF
-{
-  "_comment": "Configuration mx800_capture.py — modifier ce fichier puis redémarrer le service",
-  "_doc": "Pour ajouter un paramètre : active: false → active: true puis redémarrer le service",
-
-  "monitor_ip": "$MONITOR_IP",
-  "poll_interval": 1.0,
-  "demo_interval": 30,
-  "db_path": "$INSTALL_DIR/hegp.db",
-  "csv_dir": "$INSTALL_DIR/data/",
-  "demo_json": "$INSTALL_DIR/patient_demo.json",
-  "waves": false,
-  "hdf5_dir": "$INSTALL_DIR/waves/",
-
-  "parameters": {
-
-    "_section_cardio": "── Cardio-vasculaire ──────────────────────────────",
-    "0x4182": {"name": "HR",          "unit": "bpm",   "label": "Fréquence cardiaque",     "active": true},
-    "0x4BB8": {"name": "SpO2",        "unit": "%",     "label": "Saturation O2 (SpO2)",    "active": true},
-    "0x4822": {"name": "Pulse",       "unit": "bpm",   "label": "Pouls",                   "active": true},
-
-    "_section_abp": "── Pression artérielle invasive (ABP) ─────────────",
-    "0x4A15": {"name": "ABP_sys",     "unit": "mmHg",  "label": "ABP systolique",          "active": true},
-    "0x4A16": {"name": "ABP_dia",     "unit": "mmHg",  "label": "ABP diastolique",         "active": true},
-    "0x4A17": {"name": "ABP_mean",    "unit": "mmHg",  "label": "ABP moyenne",             "active": true},
-
-    "_section_art": "── Pression artérielle ART ────────────────────────",
-    "0x4A11": {"name": "ART_sys",     "unit": "mmHg",  "label": "ART systolique",          "active": true},
-    "0x4A12": {"name": "ART_dia",     "unit": "mmHg",  "label": "ART diastolique",         "active": true},
-    "0x4A13": {"name": "ART_mean",    "unit": "mmHg",  "label": "ART moyenne",             "active": true},
-
-    "_section_pap": "── Pression artérielle pulmonaire (PAP) ───────────",
-    "0x4A1D": {"name": "PAP_sys",     "unit": "mmHg",  "label": "PAP systolique",          "active": true},
-    "0x4A1E": {"name": "PAP_dia",     "unit": "mmHg",  "label": "PAP diastolique",         "active": true},
-    "0x4A1F": {"name": "PAP_mean",    "unit": "mmHg",  "label": "PAP moyenne",             "active": true},
-
-    "_section_cvp": "── Pression veineuse centrale (CVP) ───────────────",
-    "0x4A44": {"name": "CVP",         "unit": "mmHg",  "label": "CVP",                     "active": true},
-    "0x4A47": {"name": "CVP_mean",    "unit": "mmHg",  "label": "CVP moyenne",             "active": true},
-
-    "_section_nbp": "── Pression artérielle non invasive (NBP) ─────────",
-    "0x4A05": {"name": "NBP_sys",     "unit": "mmHg",  "label": "NBP systolique",          "active": true},
-    "0x4A06": {"name": "NBP_dia",     "unit": "mmHg",  "label": "NBP diastolique",         "active": true},
-    "0x4A07": {"name": "NBP_mean",    "unit": "mmHg",  "label": "NBP moyenne",             "active": true},
-
-    "_section_co": "── Débit cardiaque ────────────────────────────────",
-    "0x4B04": {"name": "CO",          "unit": "L/min", "label": "Débit cardiaque",         "active": true},
-    "0x4BDC": {"name": "CCO",         "unit": "L/min", "label": "Débit cardiaque continu", "active": true},
-    "0x490C": {"name": "CI",          "unit": "L/min/m2","label": "Index cardiaque",       "active": true},
-    "0x4B84": {"name": "SV",          "unit": "mL",    "label": "Volume éjection systolique","active": true},
-    "0xF049": {"name": "SVV",         "unit": "%",     "label": "Variation VES",           "active": true},
-
-    "_section_sat": "── Saturations O2 ─────────────────────────────────",
-    "0x4B34": {"name": "SaO2",        "unit": "%",     "label": "Saturation O2 artérielle","active": true},
-    "0x4B3C": {"name": "SvO2",        "unit": "%",     "label": "Saturation O2 veineuse",  "active": true},
-    "0xF100": {"name": "ScvO2",       "unit": "%",     "label": "Sat O2 veineuse centrale","active": true},
-
-    "_section_temp": "── Températures ───────────────────────────────────",
-    "0x4B48": {"name": "Temp",        "unit": "°C",    "label": "Température générique",   "active": true},
-    "0xE014": {"name": "Tblood",      "unit": "°C",    "label": "Température sanguine",    "active": true},
-    "0x4B60": {"name": "Tcore",       "unit": "°C",    "label": "Température centrale",    "active": true},
-    "0x4B74": {"name": "Tskin",       "unit": "°C",    "label": "Température cutanée",     "active": true},
-    "0x4B64": {"name": "Tesoph",      "unit": "°C",    "label": "Température oesophagienne","active": true},
-    "0x4B6C": {"name": "Tnaso",       "unit": "°C",    "label": "Température naso-pharyngée","active": true},
-    "0xF0C7": {"name": "T1",          "unit": "°C",    "label": "Température 1",           "active": true},
-    "0xF0C8": {"name": "T2",          "unit": "°C",    "label": "Température 2",           "active": true},
-
-    "_section_co2": "── CO2 / Respiratoire ─────────────────────────────",
-    "0x50B0": {"name": "EtCO2",       "unit": "mmHg",  "label": "EtCO2 end-tidal",         "active": true},
-    "0x50BA": {"name": "FiCO2",       "unit": "mmHg",  "label": "FiCO2 inspiré",           "active": true},
-    "0x5012": {"name": "RR",          "unit": "rpm",   "label": "Fréquence respiratoire",  "active": true},
-
-    "_section_bis": "── BIS / EEG ──────────────────────────────────────",
-    "0xF04E": {"name": "BIS",         "unit": "",      "label": "Bispectral Index",        "active": false},
-    "0xF04D": {"name": "BIS_SQI",     "unit": "%",     "label": "Signal Quality Index",    "active": false},
-    "0x593C": {"name": "EMG",         "unit": "dB",    "label": "Electromyographie",       "active": false},
-    "0xF04A": {"name": "SR",          "unit": "%",     "label": "Suppression Ratio",       "active": false}
-  }
-}
-CONFIGEOF
-ok "config.json créé avec IP=$MONITOR_IP"
+# Génère config.json à partir de celui du dépôt (source unique de vérité pour
+# la liste des paramètres) en y injectant l'IP et les chemins d'installation.
+python3 - "$REPO_DIR/config.json" "$INSTALL_DIR/config.json" "$MONITOR_IP" "$INSTALL_DIR" "$DISCOVERY_CIDR" << 'PYEOF'
+import json, sys
+src, dst, ip, install_dir, cidr = sys.argv[1:6]
+with open(src, encoding='utf-8') as f:
+    cfg = json.load(f)
+cfg['monitor_ip']     = ip
+cfg['discovery_cidr'] = cidr
+cfg['db_path']    = f"{install_dir}/hegp.db"
+cfg['csv_dir']    = f"{install_dir}/data/"
+cfg['demo_json']  = f"{install_dir}/patient_demo.json"
+cfg['hdf5_dir']   = f"{install_dir}/waves/"
+with open(dst, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PYEOF
+ok "config.json créé (monitor_ip=$MONITOR_IP, discovery_cidr='${DISCOVERY_CIDR:-—}')"
 
 # ── Création des dossiers ─────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR/data"
 mkdir -p "$INSTALL_DIR/waves"
 ok "Dossiers data/ et waves/ créés"
+
+# ── Configuration réseau (mode direct plug-and-play) ──────────────────────────
+# Le moniteur Philips est en BOOTP et attend une IP. En liaison directe, le Pi
+# joue le serveur : IP fixe sur eth0 + DHCP/BOOTP. Le moniteur reçoit alors une
+# IP dans la plage, et la capture le découvre par scan unicast (port 24105).
+if [ "$NET_MODE" = "direct" ]; then
+    step "Configuration réseau (liaison directe)"
+    LAN_IP="192.168.100.1"
+
+    sudo apt-get install -y dnsmasq -q && ok "dnsmasq installé"
+
+    # eth0 en IP statique permanente
+    if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
+        sudo nmcli con delete mx800-eth0 &>/dev/null || true
+        sudo nmcli con add type ethernet ifname eth0 con-name mx800-eth0 \
+            ipv4.method manual ipv4.addresses "${LAN_IP}/24" ipv6.method ignore &>/dev/null
+        sudo nmcli con up mx800-eth0 &>/dev/null || true
+        ok "eth0 en statique ${LAN_IP}/24 (NetworkManager)"
+    else
+        if ! grep -q "mx800-eth0" /etc/dhcpcd.conf 2>/dev/null; then
+            printf '\n# mx800-eth0\ninterface eth0\nstatic ip_address=%s/24\n' "$LAN_IP" | sudo tee -a /etc/dhcpcd.conf >/dev/null
+        fi
+        sudo ip addr add "${LAN_IP}/24" dev eth0 2>/dev/null || true
+        sudo ip link set eth0 up
+        ok "eth0 en statique ${LAN_IP}/24 (dhcpcd)"
+    fi
+
+    # Serveur DHCP/BOOTP sur eth0 uniquement
+    sudo tee /etc/dnsmasq.d/mx800.conf >/dev/null <<'DNSEOF'
+port=0
+interface=eth0
+bind-interfaces
+dhcp-authoritative
+dhcp-range=192.168.100.50,192.168.100.150,255.255.255.0,12h
+# Le moniteur Philips émet en BOOTP : dnsmasq n'alloue en BOOTP qu'en présence
+# d'au moins un dhcp-host. Cette entrée « déclencheur » active l'allocation
+# BOOTP dynamique pour tout moniteur, quel que soit son adresse MAC.
+dhcp-host=00:00:00:00:00:01,192.168.100.199
+DNSEOF
+    sudo systemctl enable dnsmasq &>/dev/null
+    sudo systemctl restart dnsmasq
+    ok "Serveur DHCP/BOOTP actif sur eth0 (plage 192.168.100.50-150)"
+fi
 
 # ── Service systemd ───────────────────────────────────────────────────────────
 step "Service systemd"
@@ -229,7 +224,22 @@ ok "Service mx800capture.service créé et activé"
 # ── Test de connectivité réseau ───────────────────────────────────────────────
 step "Test de connectivité"
 
-if ping -c 1 -W 2 "$MONITOR_IP" &>/dev/null; then
+if [ "$MONITOR_IP" = "auto" ]; then
+    if [ "$NET_MODE" = "direct" ]; then
+        info "Mode direct : le moniteur va recevoir une IP (DHCP/BOOTP), puis la capture"
+        info "le découvre par scan sur 192.168.100.0/24. Cela peut prendre 1-2 minutes."
+    else
+        info "Mode découverte automatique : recherche du moniteur par broadcast."
+    fi
+    info "Démarrage du service..."
+    sudo systemctl start mx800capture.service
+    sleep 3
+    if sudo systemctl is-active --quiet mx800capture.service; then
+        ok "Service démarré (découverte du moniteur en cours)"
+    else
+        warn "Service démarré mais vérifiez les logs : journalctl -u mx800capture.service -f"
+    fi
+elif ping -c 1 -W 2 "$MONITOR_IP" &>/dev/null; then
     ok "Moniteur $MONITOR_IP accessible"
     info "Démarrage du service..."
     sudo systemctl start mx800capture.service
@@ -255,7 +265,7 @@ echo -e "${BOLD}Fichiers installés :${NC}"
 echo "  $INSTALL_DIR/mx800_capture.py"
 echo "  $INSTALL_DIR/config.json"
 echo "  $INSTALL_DIR/hegp.db       (créé au premier démarrage)"
-echo "  $INSTALL_DIR/data/         (CSV par session)"
+echo "  $INSTALL_DIR/data/         (CSV par intervention)"
 echo ""
 echo -e "${BOLD}Commandes utiles :${NC}"
 echo "  sudo systemctl status mx800capture.service"
@@ -266,7 +276,7 @@ echo -e "${BOLD}Changer l'IP du moniteur :${NC}"
 echo "  nano $INSTALL_DIR/config.json"
 echo "  sudo systemctl restart mx800capture.service"
 echo ""
-echo -e "${BOLD}Activer le BIS :${NC}"
-echo "  nano $INSTALL_DIR/config.json  →  BIS: \"active\": true"
+echo -e "${BOLD}Activer un paramètre optionnel (ex. ventilation, gaz du sang) :${NC}"
+echo "  nano $INSTALL_DIR/config.json  →  passer \"active\": false à true"
 echo "  sudo systemctl restart mx800capture.service"
 echo ""

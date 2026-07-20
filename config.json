@@ -1,8 +1,11 @@
 {
   "_comment": "Configuration mx800_capture.py — modifier ce fichier puis redémarrer le service",
   "_doc": "Pour ajouter un paramètre : ajouter une entrée dans 'parameters' et relancer le service",
+  "_doc_ip": "monitor_ip : IP fixe du moniteur, ou 'auto' (ou vide) pour découverte automatique par broadcast",
+  "_doc_discovery": "discovery_cidr : plage à balayer (ex. 192.168.1.0/24) si le broadcast ne suffit pas (réseaux routés/VLAN) ; laisser vide sinon",
 
   "monitor_ip": "192.168.100.31",
+  "discovery_cidr": "",
   "poll_interval": 1.0,
   "demo_interval": 30,
   "db_path": "/home/hegp/hegp.db",

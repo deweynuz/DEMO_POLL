@@ -18,6 +18,7 @@ import json
 import os
 import time
 import argparse
+import ipaddress
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -152,6 +153,10 @@ NUMERIC_COLS_DYNAMIC = []  # rempli au démarrage par load_config()
 # Ports
 MX800_DATA_PORT = 24105
 LOCAL_PORT      = 24106
+
+# Découverte automatique du moniteur
+DISCOVERY_ADDR  = '255.255.255.255'  # broadcast limité (atteint le segment L2 local)
+ASSOC_RETRY_SEC = 4                  # ré-émission de l'Association Request tant que non associé
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ASSOCIATION REQUEST (bytes PIPG p.298-305)
@@ -535,10 +540,31 @@ def init_db(db_path: str) -> sqlite3.Connection:
             end_time    TEXT
         )
     """)
+    # Une « intervention » regroupe TOUTES les données d'un même patient en
+    # cumulé, à travers les déconnexions/reconnexions réseau. Une nouvelle
+    # intervention démarre dès que le patient_id change (donc un patient qui
+    # revient après un autre patient = une nouvelle intervention). Une
+    # intervention peut couvrir plusieurs sessions ; start_session_id note
+    # seulement la session où elle a débuté.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS interventions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_session_id INTEGER,
+            patient_id       TEXT,
+            family_name      TEXT,
+            given_name       TEXT,
+            sex              TEXT,
+            patient_type     TEXT,
+            start_time       TEXT,
+            end_time         TEXT,
+            FOREIGN KEY(start_session_id) REFERENCES sessions(id)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  INTEGER,
+            intervention_id INTEGER,
             patient_id  TEXT,
             family_name TEXT,
             given_name  TEXT,
@@ -546,13 +572,15 @@ def init_db(db_path: str) -> sqlite3.Connection:
             patient_type TEXT,
             demo_state  TEXT,
             admitted_at TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(intervention_id) REFERENCES interventions(id)
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS numerics (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  INTEGER,
+            intervention_id INTEGER,
             patient_db_id INTEGER,
             timestamp   TEXT,
             HR          REAL, SpO2       REAL, Pulse      REAL,
@@ -569,12 +597,26 @@ def init_db(db_path: str) -> sqlite3.Connection:
             Tcore       REAL, Tskin      REAL, Tesoph     REAL,
             Tnaso       REAL, Tart       REAL, T1         REAL, T2 REAL,
             EtCO2       REAL, FiCO2      REAL, RR         REAL,
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
+            FOREIGN KEY(session_id) REFERENCES sessions(id),
+            FOREIGN KEY(intervention_id) REFERENCES interventions(id)
         )
     """)
+    # Migration des bases antérieures : garantit la colonne intervention_id
+    # en INTEGER AVANT de créer l'index qui la référence (sinon la migration
+    # générique de insert_numerics l'ajouterait en REAL et stockerait les id
+    # d'intervention en flottant).
+    for tbl in ('numerics', 'patients'):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})")}
+        if 'intervention_id' not in cols:
+            log.info(f"Migration DB : ajout colonne 'intervention_id' à {tbl}")
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN intervention_id INTEGER")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_numerics_ts
         ON numerics(session_id, timestamp)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_numerics_intervention
+        ON numerics(intervention_id, timestamp)
     """)
     conn.commit()
     return conn
@@ -582,15 +624,17 @@ def init_db(db_path: str) -> sqlite3.Connection:
 _COLS_BASE = ['timestamp', 'patient_id', 'family_name', 'given_name']
 
 def get_numeric_cols():
-    """Retourne les colonnes numériques actives (depuis config)."""
-    return NUMERIC_COLS_DYNAMIC if NUMERIC_COLS_DYNAMIC else NUMERIC_COLS
+    """Retourne les colonnes numériques actives (depuis config.json)."""
+    # NUMERIC_COLS_DYNAMIC vaut [] tant que load_config() n'a rien chargé ;
+    # on renvoie alors une liste vide plutôt qu'une variable inexistante.
+    return NUMERIC_COLS_DYNAMIC
 
-def insert_numerics(conn, session_id, patient_db_id, ts, values: dict):
+def insert_numerics(conn, session_id, intervention_id, patient_db_id, ts, values: dict):
     cols = get_numeric_cols()
     row  = {col: values.get(col) for col in cols}
-    all_cols = ['session_id', 'patient_db_id', 'timestamp'] + cols
+    all_cols = ['session_id', 'intervention_id', 'patient_db_id', 'timestamp'] + cols
     placeholders = ','.join(['?'] * len(all_cols))
-    vals = [session_id, patient_db_id, ts] + [row[c] for c in cols]
+    vals = [session_id, intervention_id, patient_db_id, ts] + [row[c] for c in cols]
     # Add any columns not yet in the schema before inserting
     existing = {row[1] for row in conn.execute("PRAGMA table_info(numerics)")}
     for col in all_cols:
@@ -604,18 +648,56 @@ def insert_numerics(conn, session_id, patient_db_id, ts, values: dict):
     )
     conn.commit()
 
-def upsert_patient(conn, session_id, demo: dict) -> int:
-    """Insère ou met à jour le patient, retourne son id DB."""
+def open_intervention(conn, start_session_id, demo: dict) -> int:
+    """
+    Ouvre une nouvelle intervention pour le patient courant et retourne son id.
+    Appelée au premier patient identifié et à chaque changement de patient_id.
+    """
+    cur = conn.execute("""
+        INSERT INTO interventions
+        (start_session_id, patient_id, family_name, given_name, sex, patient_type, start_time)
+        VALUES (?,?,?,?,?,?,?)
+    """, (
+        start_session_id,
+        demo.get('patient_id', ''),
+        demo.get('family_name', ''),
+        demo.get('given_name', ''),
+        demo.get('sex', ''),
+        demo.get('patient_type', ''),
+        datetime.now().isoformat()
+    ))
+    conn.commit()
+    iid = cur.lastrowid
+    log.info(f"Nouvelle intervention : id={iid} "
+             f"patient={demo.get('patient_id') or 'unknown'} "
+             f"({demo.get('family_name','')} {demo.get('given_name','')})")
+    return iid
+
+def close_intervention(conn, intervention_id):
+    """Horodate la fin d'une intervention (changement de patient ou arrêt)."""
+    if intervention_id:
+        conn.execute(
+            "UPDATE interventions SET end_time=? WHERE id=?",
+            (datetime.now().isoformat(), intervention_id)
+        )
+        conn.commit()
+
+def upsert_patient(conn, intervention_id, session_id, demo: dict) -> int:
+    """
+    Insère ou met à jour le patient de l'intervention en cours, retourne son id DB.
+    Une intervention = un patient : la ligne patients est unique par intervention.
+    """
     cur = conn.execute(
-        "SELECT id FROM patients WHERE session_id=? AND patient_id=?",
-        (session_id, demo.get('patient_id', ''))
+        "SELECT id FROM patients WHERE intervention_id=?",
+        (intervention_id,)
     )
     row = cur.fetchone()
     if row:
         conn.execute("""
-            UPDATE patients SET family_name=?, given_name=?, sex=?,
+            UPDATE patients SET session_id=?, family_name=?, given_name=?, sex=?,
             patient_type=?, demo_state=? WHERE id=?
         """, (
+            session_id,
             demo.get('family_name', ''), demo.get('given_name', ''),
             demo.get('sex', ''), demo.get('patient_type', ''),
             demo.get('demo_state', ''), row[0]
@@ -625,10 +707,11 @@ def upsert_patient(conn, session_id, demo: dict) -> int:
     else:
         cur = conn.execute("""
             INSERT INTO patients
-            (session_id, patient_id, family_name, given_name, sex, patient_type, demo_state, admitted_at)
-            VALUES (?,?,?,?,?,?,?,?)
+            (session_id, intervention_id, patient_id, family_name, given_name, sex, patient_type, demo_state, admitted_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (
             session_id,
+            intervention_id,
             demo.get('patient_id', ''),
             demo.get('family_name', ''),
             demo.get('given_name', ''),
@@ -646,16 +729,22 @@ def upsert_patient(conn, session_id, demo: dict) -> int:
 
 CSV_COLS = _COLS_BASE  # colonnes de base — complétées dynamiquement au runtime
 
-def get_csv_writer(csv_dir: str, session_id: int, patient_id: str):
-    """Retourne (file_handle, csv_writer) pour la session en cours."""
+def get_csv_writer(csv_dir: str, intervention_id: int, patient_id: str):
+    """
+    Retourne (file_handle, csv_writer) pour l'intervention en cours.
+    Le fichier est nommé par intervention et ouvert en append : les données
+    d'un même patient restent cumulées dans un seul CSV, même après une
+    reconnexion réseau. L'en-tête n'est écrit que si le fichier est neuf.
+    """
     Path(csv_dir).mkdir(parents=True, exist_ok=True)
-    date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    fname = f"session_{session_id}_{date_str}_{patient_id or 'unknown'}.csv"
+    fname = f"intervention_{intervention_id}_{patient_id or 'unknown'}.csv"
     fpath = os.path.join(csv_dir, fname)
-    f = open(fpath, 'w', newline='', encoding='utf-8')
-    fieldnames = CSV_COLS_BASE + get_numeric_cols()
+    is_new = (not os.path.exists(fpath)) or os.path.getsize(fpath) == 0
+    f = open(fpath, 'a', newline='', encoding='utf-8')
+    fieldnames = _COLS_BASE + get_numeric_cols()
     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-    writer.writeheader()
+    if is_new:
+        writer.writeheader()
     log.info(f"CSV ouvert : {fpath}")
     return f, writer
 
@@ -748,22 +837,24 @@ def parse_wave_poll_result(payload: bytes) -> dict:
 class HDF5Writer:
     """Écrit les waveforms dans un fichier HDF5 par session."""
 
-    def __init__(self, hdf5_dir: str, session_id: int, patient_id: str = 'unknown'):
+    def __init__(self, hdf5_dir: str, intervention_id: int, patient_id: str = 'unknown'):
         if not HDF5_AVAILABLE:
             raise RuntimeError("h5py non installé — lance : pip install h5py numpy --break-system-packages")
         Path(hdf5_dir).mkdir(parents=True, exist_ok=True)
-        date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        fname = f"session_{session_id}_{date_str}_{patient_id}.h5"
+        # Nommage par intervention + mode 'a' : les waveforms d'un même patient
+        # restent cumulées dans un seul fichier, même après une reconnexion.
+        fname = f"intervention_{intervention_id}_{patient_id}.h5"
         self.path = os.path.join(hdf5_dir, fname)
-        self.f = h5py.File(self.path, 'w')
-        self.f.attrs['session_id']  = session_id
+        self.f = h5py.File(self.path, 'a')
+        self.f.attrs['intervention_id'] = intervention_id
         self.f.attrs['patient_id']  = patient_id
-        self.f.attrs['created_at']  = datetime.now().isoformat()
+        if 'created_at' not in self.f.attrs:
+            self.f.attrs['created_at'] = datetime.now().isoformat()
         self.f.attrs['monitor_protocol'] = 'Philips IntelliVue Data Export UDP'
-        # Groupes
-        self.waves_grp = self.f.create_group('waves')
-        self.meta_grp  = self.f.create_group('patient')
-        self.ts_grp    = self.f.create_group('timestamps')
+        # Groupes (require_group : réutilise ceux déjà présents en mode append)
+        self.waves_grp = self.f.require_group('waves')
+        self.meta_grp  = self.f.require_group('patient')
+        self.ts_grp    = self.f.require_group('timestamps')
         # Buffers en mémoire (flush toutes les N trames)
         self._buffers  = {}   # canal → [samples]
         self._ts_buf   = {}   # canal → [timestamps]
@@ -838,20 +929,21 @@ class HDF5Writer:
 def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
         poll_interval: float = 1.0, demo_interval: int = 30,
         waves: bool = False, hdf5_dir: str = '/home/hegp/waves/',
-        config_path: str = DEFAULT_CONFIG_PATH):
+        config_path: str = DEFAULT_CONFIG_PATH, discovery_cidr: str = ''):
 
     # Charge la config (PHYSIO_MAP + NUMERIC_COLS_DYNAMIC)
     cfg = load_config(config_path)
     # Les args CLI ont priorité sur config.json
     if cfg:
-        monitor_ip    = monitor_ip    or cfg.get('monitor_ip',    monitor_ip)
-        db_path       = db_path       or cfg.get('db_path',       db_path)
-        csv_dir       = csv_dir       or cfg.get('csv_dir',       csv_dir)
-        demo_json     = demo_json     or cfg.get('demo_json',     demo_json)
-        poll_interval = poll_interval or cfg.get('poll_interval', poll_interval)
-        demo_interval = demo_interval or cfg.get('demo_interval', demo_interval)
-        waves         = waves         or cfg.get('waves',         waves)
-        hdf5_dir      = hdf5_dir      or cfg.get('hdf5_dir',      hdf5_dir)
+        monitor_ip     = monitor_ip     or cfg.get('monitor_ip',     monitor_ip)
+        db_path        = db_path        or cfg.get('db_path',        db_path)
+        csv_dir        = csv_dir        or cfg.get('csv_dir',        csv_dir)
+        demo_json      = demo_json      or cfg.get('demo_json',      demo_json)
+        poll_interval  = poll_interval  or cfg.get('poll_interval',  poll_interval)
+        demo_interval  = demo_interval  or cfg.get('demo_interval',  demo_interval)
+        waves          = waves          or cfg.get('waves',          waves)
+        hdf5_dir       = hdf5_dir       or cfg.get('hdf5_dir',       hdf5_dir)
+        discovery_cidr = discovery_cidr or cfg.get('discovery_cidr', discovery_cidr)
 
     if waves and not HDF5_AVAILABLE:
         log.error("--waves nécessite h5py : pip install h5py numpy --break-system-packages")
@@ -860,17 +952,40 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     conn = init_db(db_path)
     log.info(f"Base SQLite : {db_path}")
 
+    # Découverte automatique si monitor_ip vaut "auto" ou est vide : on ne connaît
+    # pas encore l'IP du moniteur, on l'apprend du premier paquet qu'il renvoie.
+    auto_discover = (not monitor_ip) or str(monitor_ip).strip().lower() == 'auto'
+    if auto_discover:
+        monitor_ip = None
+    # Repli optionnel pour réseaux routés/VLAN : balayage d'une plage CIDR.
+    discovery_hosts = []
+    if auto_discover and discovery_cidr:
+        try:
+            net = ipaddress.ip_network(str(discovery_cidr), strict=False)
+            discovery_hosts = [str(h) for h in net.hosts()]
+        except ValueError as e:
+            log.warning(f"discovery_cidr invalide ({discovery_cidr}) : {e}")
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(3.0)
+    if auto_discover:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         sock.bind(('', LOCAL_PORT))
     except OSError:
         sock.bind(('', 0))
-    log.info(f"Socket : {sock.getsockname()} → {monitor_ip}:{MX800_DATA_PORT}")
+    if auto_discover:
+        scan = f" + scan {len(discovery_hosts)} IP" if discovery_hosts else ""
+        log.info(f"Socket : {sock.getsockname()} → découverte automatique du moniteur "
+                 f"(broadcast{scan})")
+    else:
+        log.info(f"Socket : {sock.getsockname()} → {monitor_ip}:{MX800_DATA_PORT}")
 
     # État
     associated    = False
     session_id    = None
+    intervention_id    = None   # épisode patient courant (cumulé)
+    current_patient_id = None   # patient_id de l'intervention en cours
     patient_db_id = None
     patient_info  = {}
     csv_file      = None
@@ -880,16 +995,30 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     last_nu_poll  = 0.0
     last_demo_poll = 0.0
     last_wave_poll = 0.0
+    last_assoc_send = 0.0
     # Accumulation des linked results (plusieurs paquets pour un même poll)
     pending       = {}   # invoke_id → dict valeurs accumulées
     pending_ts    = {}   # invoke_id → timestamp premier paquet
     pending_obj   = {}   # invoke_id → obj_code
 
     def send_assoc():
-        nonlocal associated
-        log.info(f"Envoi Association Request {'(avec waveforms)' if waves else ''}...")
-        sock.sendto(build_assoc_request(waves), (monitor_ip, MX800_DATA_PORT))
+        nonlocal associated, last_assoc_send
+        if monitor_ip:
+            sock.sendto(build_assoc_request(waves), (monitor_ip, MX800_DATA_PORT))
+            log.info(f"Envoi Association Request → {monitor_ip} "
+                     f"{'(avec waveforms)' if waves else ''}")
+        else:
+            # Découverte : broadcast sur le segment (+ balayage CIDR optionnel)
+            pkt = build_assoc_request(waves)
+            for target in (DISCOVERY_ADDR, *discovery_hosts):
+                try:
+                    sock.sendto(pkt, (target, MX800_DATA_PORT))
+                except OSError:
+                    pass
+            scan = f" + scan {len(discovery_hosts)} IP" if discovery_hosts else ""
+            log.info(f"Recherche du moniteur (broadcast{scan})...")
         associated = False
+        last_assoc_send = time.time()
 
     def open_session():
         nonlocal session_id
@@ -927,8 +1056,18 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                 mtype = detect_message_type(data)
                 log.debug(f"Reçu {len(data)}o [{mtype}] de {addr}")
 
+                # ── Découverte : adopte l'IP du 1er moniteur qui répond ───
+                # Verrouillé une fois associé : si plusieurs moniteurs répondent
+                # sur le segment, on ne bascule pas de l'un à l'autre.
+                if auto_discover and not associated and monitor_ip != addr[0] \
+                        and mtype in ('ASSOC_RESPONSE', 'MDS_CREATE'):
+                    monitor_ip = addr[0]
+                    log.info(f"Moniteur découvert à l'adresse {monitor_ip}")
+
                 # ── Association Response ──────────────────────────────────
-                if mtype == 'ASSOC_RESPONSE':
+                # Ignore les réponses en double (retransmissions, multi-NIC) :
+                # on n'ouvre pas de nouvelle session tant qu'on est déjà associé.
+                if mtype == 'ASSOC_RESPONSE' and not associated:
                     log.info("Association établie.")
                     associated = True
                     open_session()
@@ -936,7 +1075,11 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     last_demo_poll = 0.0
 
                 # ── MDS Create Event ──────────────────────────────────────
-                if mtype == 'MDS_CREATE' and not associated:
+                # Toujours confirmer : le moniteur ré-émet cet événement et coupe
+                # l'association (ABORT) au bout de ~10 s s'il ne reçoit pas la
+                # confirmation — y compris quand une Association Response a déjà
+                # été reçue juste avant (sinon on saute la confirmation → ABORT).
+                if mtype == 'MDS_CREATE':
                     parsed = parse_mds_create(data)
                     if parsed:
                         invoke_id, managed_obj, event_time = parsed
@@ -944,8 +1087,13 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                             build_mds_create_result(invoke_id, managed_obj, event_time),
                             addr
                         )
-                        log.info(f"MDS Create Event confirmé (invoke_id={invoke_id})")
-                        associated = True
+                        if not associated:
+                            log.info(f"MDS Create Event confirmé (invoke_id={invoke_id})")
+                            associated = True
+                            if session_id is None:
+                                open_session()
+                            last_nu_poll = 0.0
+                            last_demo_poll = 0.0
 
                 # ── Refuse ────────────────────────────────────────────────
                 elif mtype == 'REFUSE':
@@ -959,6 +1107,8 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     associated = False
                     close_session()
                     session_id = None
+                    if auto_discover:
+                        monitor_ip = None   # ré-apprend l'IP au prochain send_assoc
                     time.sleep(10)
                     send_assoc()
 
@@ -992,7 +1142,7 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                                     'family_name': patient_info.get('family_name', ''),
                                     'given_name':  patient_info.get('given_name', ''),
                                 })
-                                insert_numerics(conn, session_id, patient_db_id, ts, merged)
+                                insert_numerics(conn, session_id, intervention_id, patient_db_id, ts, merged)
                                 if csv_writer:
                                     csv_writer.writerow({'timestamp': ts, **merged})
                                     csv_file.flush()
@@ -1006,22 +1156,32 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     elif obj_code == NOM_MOC_PT_DEMOG:
                         demo = values
                         if demo and demo.get('demo_state') == 'ADMITTED':
-                            changed = demo.get('patient_id') != patient_info.get('patient_id')
-                            patient_info  = demo
-                            patient_db_id = upsert_patient(conn, session_id, demo)
+                            # Nouvelle intervention si aucune en cours, ou si le
+                            # patient_id diffère de celui de l'intervention
+                            # courante. Un même patient (même après reconnexion)
+                            # reste dans la même intervention ; un patient qui
+                            # revient après un autre patient = nouvelle intervention.
+                            new_patient = demo.get('patient_id')
+                            changed = (intervention_id is None) or (new_patient != current_patient_id)
+                            patient_info = demo
+                            if changed:
+                                close_intervention(conn, intervention_id)
+                                intervention_id    = open_intervention(conn, session_id, demo)
+                                current_patient_id = new_patient
+                            patient_db_id = upsert_patient(conn, intervention_id, session_id, demo)
                             if changed or csv_writer is None:
                                 if csv_file:
                                     csv_file.close()
                                 csv_file   = None
                                 csv_writer = None
                                 csv_file, csv_writer = get_csv_writer(
-                                    csv_dir, session_id, demo.get('patient_id', 'unknown')
+                                    csv_dir, intervention_id, demo.get('patient_id', 'unknown')
                                 )
                             if waves and (changed or hdf5_writer is None):
                                 if hdf5_writer:
                                     hdf5_writer.close()
                                 hdf5_writer = HDF5Writer(
-                                    hdf5_dir, session_id, demo.get('patient_id', 'unknown')
+                                    hdf5_dir, intervention_id, demo.get('patient_id', 'unknown')
                                 )
                                 hdf5_writer.write_patient(demo)
                             with open(demo_json, 'w') as f:
@@ -1047,6 +1207,10 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                 log.error(f"Erreur réception : {e}")
 
             if not associated:
+                # Relance périodiquement l'Association Request (découverte ou
+                # simple reconnexion) tant que le moniteur n'a pas répondu.
+                if time.time() - last_assoc_send >= ASSOC_RETRY_SEC:
+                    send_assoc()
                 continue
 
             now = time.time()
@@ -1082,7 +1246,12 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
     except KeyboardInterrupt:
         log.info("Arrêt demandé...")
     finally:
-        sock.sendto(RELEASE_REQ, (monitor_ip, MX800_DATA_PORT))
+        if monitor_ip:
+            try:
+                sock.sendto(RELEASE_REQ, (monitor_ip, MX800_DATA_PORT))
+            except OSError:
+                pass
+        close_intervention(conn, intervention_id)
         close_session()
         sock.close()
         conn.close()
@@ -1098,7 +1267,11 @@ if __name__ == '__main__':
     parser.add_argument('--config',  default=DEFAULT_CONFIG_PATH,
                         help=f'Fichier de configuration JSON (défaut: {DEFAULT_CONFIG_PATH})')
     parser.add_argument('--ip',      default='',
-                        help='IP du moniteur (défaut: depuis config.json)')
+                        help='IP du moniteur, ou "auto" pour la découverte automatique '
+                             '(défaut: depuis config.json ; vide ou "auto" = découverte)')
+    parser.add_argument('--discover-cidr', default='',
+                        help='Plage CIDR à balayer en découverte si le broadcast ne '
+                             'suffit pas (ex. 192.168.1.0/24 ; réseaux routés/VLAN)')
     parser.add_argument('--db',      default='',
                         help='Chemin base SQLite (défaut: depuis config.json)')
     parser.add_argument('--csv',     default='',
@@ -1120,13 +1293,14 @@ if __name__ == '__main__':
         log.setLevel(logging.DEBUG)
 
     run(
-        monitor_ip    = args.ip      or '192.168.100.31',
-        db_path       = args.db      or '/home/hegp/hegp.db',
-        csv_dir       = args.csv     or '/home/hegp/data/',
-        demo_json     = args.json    or '/home/hegp/patient_demo.json',
-        poll_interval = args.interval or 1.0,
-        demo_interval = args.demo_interval or 30,
-        waves         = args.waves,
-        hdf5_dir      = args.hdf5    or '/home/hegp/waves/',
-        config_path   = args.config,
+        monitor_ip     = args.ip,   # vide ou "auto" → découverte automatique
+        db_path        = args.db      or '/home/hegp/hegp.db',
+        csv_dir        = args.csv     or '/home/hegp/data/',
+        demo_json      = args.json    or '/home/hegp/patient_demo.json',
+        poll_interval  = args.interval or 1.0,
+        demo_interval  = args.demo_interval or 30,
+        waves          = args.waves,
+        hdf5_dir       = args.hdf5    or '/home/hegp/waves/',
+        config_path    = args.config,
+        discovery_cidr = args.discover_cidr,
     )
