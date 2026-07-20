@@ -1075,7 +1075,11 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                     last_demo_poll = 0.0
 
                 # ── MDS Create Event ──────────────────────────────────────
-                if mtype == 'MDS_CREATE' and not associated:
+                # Toujours confirmer : le moniteur ré-émet cet événement et coupe
+                # l'association (ABORT) au bout de ~10 s s'il ne reçoit pas la
+                # confirmation — y compris quand une Association Response a déjà
+                # été reçue juste avant (sinon on saute la confirmation → ABORT).
+                if mtype == 'MDS_CREATE':
                     parsed = parse_mds_create(data)
                     if parsed:
                         invoke_id, managed_obj, event_time = parsed
@@ -1083,8 +1087,13 @@ def run(monitor_ip: str, db_path: str, csv_dir: str, demo_json: str,
                             build_mds_create_result(invoke_id, managed_obj, event_time),
                             addr
                         )
-                        log.info(f"MDS Create Event confirmé (invoke_id={invoke_id})")
-                        associated = True
+                        if not associated:
+                            log.info(f"MDS Create Event confirmé (invoke_id={invoke_id})")
+                            associated = True
+                            if session_id is None:
+                                open_session()
+                            last_nu_poll = 0.0
+                            last_demo_poll = 0.0
 
                 # ── Refuse ────────────────────────────────────────────────
                 elif mtype == 'REFUSE':
