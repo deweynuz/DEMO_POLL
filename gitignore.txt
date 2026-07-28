@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# DONNÉES PATIENTS — NE JAMAIS COMMITER
+# Ces fichiers contiennent des noms, identifiants hospitaliers et données
+# physiologiques. Leur publication constituerait une violation du RGPD.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Base SQLite et ses journaux
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Exports CSV par intervention
+data/
+*.csv
+
+# Waveforms
+waves/
+*.h5
+*.hdf5
+
+# État patient temps réel
+patient_demo.json
+
+# Configuration locale (contient des chemins et l'IP du site)
+config.json
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Divers
+# ═══════════════════════════════════════════════════════════════════════════
+__pycache__/
+*.pyc
+*.log
+*.bak
+*.bak.*
+.venv/
+.DS_Store

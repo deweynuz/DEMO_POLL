@@ -1,0 +1,23 @@
+[Unit]
+Description=MX800 Patient Data Capture
+Documentation=https://github.com/deweynuz/DEMO_POLL
+After=network-online.target dnsmasq.service
+Wants=network-online.target
+
+[Service]
+# __USER__ et __INSTALL_DIR__ sont remplacés par install.sh
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=/usr/bin/python3 __INSTALL_DIR__/mx800_capture.py --config __INSTALL_DIR__/config.json
+
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+
+# Pas de WatchdogSec : le script n'implémente pas sd_notify et serait
+# tué toutes les 2 minutes. Restart=always suffit.
+
+[Install]
+WantedBy=multi-user.target
