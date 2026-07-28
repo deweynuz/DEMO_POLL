@@ -81,7 +81,8 @@ nécessaires que pour la capture des courbes (`--waves`).
 ### Installation automatique (recommandée)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/deweynuz/DEMO_POLL/main/install.sh | bash
+curl -sSLO https://raw.githubusercontent.com/deweynuz/DEMO_POLL/main/install.sh
+bash install.sh
 ```
 
 Le script `install.sh` (interactif) :

@@ -1,7 +1,8 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
 # install.sh — Installation automatique système d'acquisition MX800 HEGP
-# Usage : curl -sSL https://raw.githubusercontent.com/deweynuz/DEMO_POLL/main/install.sh | bash
+# Usage : curl -sSLO https://raw.githubusercontent.com/deweynuz/DEMO_POLL/main/install.sh
+#         bash install.sh
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -e
@@ -19,6 +20,14 @@ info() { echo -e "${BLUE}→${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 err()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 step() { echo -e "\n${BOLD}${BLUE}══ $1 ══${NC}"; }
+
+# Lecture des réponses depuis le terminal, même quand le script est exécuté via
+# `curl ... | bash` (stdin = le script, pas le clavier). On lit alors /dev/tty.
+if [ -r /dev/tty ]; then
+    ask() { read -r -p "$1" "$2" < /dev/tty; }
+else
+    ask() { read -r -p "$1" "$2"; }
+fi
 
 # ── Bannière ─────────────────────────────────────────────────────────────────
 clear
@@ -59,14 +68,14 @@ echo -e "  1) ${BOLD}Direct (plug-and-play)${NC} — câble Ethernet Pi ↔ moni
 echo -e "     Le Pi configure le réseau (IP fixe + serveur DHCP/BOOTP) et découvre"
 echo -e "     le moniteur tout seul. Recommandé."
 echo -e "  2) ${BOLD}Réseau existant${NC} — le moniteur a déjà une IP sur un réseau."
-read -p "  Choix [1] : " NET_CHOICE
+ask "  Choix [1] : " NET_CHOICE
 NET_CHOICE=${NET_CHOICE:-1}
 
 if [ "$NET_CHOICE" = "2" ]; then
     NET_MODE="network"
     echo ""
     echo -e "${BOLD}IP du moniteur ?${NC} (ou 'auto' pour la découverte par broadcast)"
-    read -p "  IP moniteur [auto] : " MONITOR_IP
+    ask "  IP moniteur [auto] : " MONITOR_IP
     MONITOR_IP=${MONITOR_IP:-auto}
     DISCOVERY_CIDR=""
 else
@@ -77,7 +86,7 @@ fi
 
 echo ""
 echo -e "${BOLD}Dossier d'installation ?${NC}"
-read -p "  Dossier [/home/$USER] : " INSTALL_DIR
+ask "  Dossier [/home/$USER] : " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-/home/$USER}
 
 echo ""
@@ -88,7 +97,7 @@ echo "  IP moniteur    : $MONITOR_IP"
 echo "  Dossier        : $INSTALL_DIR"
 echo "  Repository     : https://github.com/deweynuz/DEMO_POLL"
 echo ""
-read -p "Confirmer l'installation ? [O/n] : " CONFIRM
+ask "Confirmer l'installation ? [O/n] : " CONFIRM
 CONFIRM=${CONFIRM:-O}
 if [[ ! "$CONFIRM" =~ ^[OoYy]$ ]]; then
     echo "Installation annulée."
@@ -97,8 +106,37 @@ fi
 
 # ── Mise à jour système ───────────────────────────────────────────────────────
 step "Mise à jour du système"
+
+# Sur une image RPi fraîche, un upgrade interrompu laisse dpkg dans un état
+# cassé (« E: dpkg was interrupted »), ce qui ferait échouer toute installation
+# de paquets (dnsmasq, sqlite3…). On attend un éventuel apt en cours, puis on
+# répare dpkg avant de continuer.
+info "Vérification de l'état du gestionnaire de paquets..."
+waited=0
+while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 \
+      || pgrep -x "apt|apt-get|dpkg|unattended-upgr" >/dev/null 2>&1; do
+    if [ "$waited" -ge 120 ]; then
+        warn "apt/dpkg toujours occupé après 120 s — on tente de continuer."
+        break
+    fi
+    info "apt/dpkg occupé, attente... (${waited}s)"
+    sleep 5
+    waited=$((waited + 5))
+done
+
+if sudo dpkg --audit 2>/dev/null | grep -q .; then
+    warn "dpkg dans un état incomplet — réparation..."
+    sudo dpkg --configure -a || true
+    sudo apt-get -f install -y || true
+    ok "dpkg réparé"
+fi
+
 info "Mise à jour des paquets (peut prendre quelques minutes)..."
-sudo apt-get update -q
+if ! sudo apt-get update -q; then
+    warn "apt-get update a échoué — nouvelle tentative après réparation de dpkg..."
+    sudo dpkg --configure -a || true
+    sudo apt-get update -q || err "apt-get update échoue (dpkg interrompu ?). Lancez 'sudo dpkg --configure -a' puis relancez l'installation."
+fi
 sudo apt-get install -y sqlite3 python3-pip -q
 ok "Système à jour"
 
