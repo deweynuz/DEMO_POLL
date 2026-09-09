@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# DONNÉES PATIENTS — NE JAMAIS COMMITER
+# Ce dépôt contient du CODE uniquement. Les données et la configuration
+# locale vivent hors dépôt (/var/lib/mx800, /etc/mx800).
+# Ces règles sont une seconde barrière : si un fichier de données atterrit
+# ici par accident, git ne le proposera pas.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Bases SQLite et journaux WAL
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Exports et données brutes
+data/
+sauvegardes/
+*.csv
+*.parquet
+
+# Courbes
+waves/
+courbes/
+*.h5
+*.hdf5
+
+# Démographiques patient
+patient_demo.json
+patients.db
+
+# Configuration locale (contient l'IP/MAC du moniteur et les chemins du site)
+config.json
+config.toml
+config.local.*
+
+# Captures réseau : contiennent des données physiologiques identifiables
+*.pcap
+*.pcapng
+
+# Guide Philips : document sous copyright, non redistribuable
+docs/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
