@@ -124,11 +124,13 @@ def verifier(chemin: Path, *, site: str, salle: str, uuid_attendu: str = '',
     if attendu and not info.uuid:
         log.warning("UUID du volume %s indéterminable : vérification impossible", chemin)
 
-    if contenu.get('salle') and contenu['salle'] != salle:
-        raise VolumeInvalide(
-            f"le volume {chemin} contient les données de la salle "
-            f"{contenu['salle']!r}, or ce Pi est configuré pour {salle!r}. "
-            f"Disque déplacé d'une salle à l'autre ? Ne pas mélanger.")
+    if contenu.get('salle') and salle and contenu['salle'] != salle:
+        # Le Pi est mobile : il change de salle avec son disque. Ce n'est donc
+        # PAS une erreur, seulement un fait à consigner. Chaque session porte
+        # sa propre salle, les données ne se mélangent pas.
+        log.info("Le volume %s portait la salle %r, ce Pi est maintenant en %r. "
+                 "Les données restent distinguées par session.",
+                 chemin, contenu['salle'], salle)
     if contenu.get('site') and contenu['site'] != site:
         raise VolumeInvalide(
             f"le volume {chemin} appartient au site {contenu['site']!r}, "

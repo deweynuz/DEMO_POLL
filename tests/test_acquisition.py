@@ -71,11 +71,13 @@ def acquisition(tmp_path):
         base = Base(tmp_path / 'mx800.db', version_module='test')
         rapporteur = RapporteurEtat(tmp_path / 'status.json',
                                     site=cfg.site.nom, salle=cfg.site.salle)
-        acq = ACQ.Acquisition(cfg, base, rapporteur, chemin_baux=_baux(tmp_path))
+        # port_local=0 : un port éphémère. Se lier à 24106 volerait des
+        # datagrammes au service de production s'il tourne sur la machine.
+        # consulter_arp=False : sans cela les tests retombent sur la table ARP
+        # de la machine et émettent du trafic vers de VRAIS moniteurs cliniques.
+        acq = ACQ.Acquisition(cfg, base, rapporteur, chemin_baux=_baux(tmp_path),
+                              port_moniteur=port, port_local=0, consulter_arp=False)
         acq.ouvrir_socket()
-        # le simulateur écoute sur 127.0.0.1:<port>, pas sur le port standard
-        acq._envoyer_reel = acq._envoyer
-        acq._envoyer = lambda d, _p=port: acq.sock.sendto(d, ('127.0.0.1', _p))
         ouverts.append(acq)
         return acq, base, rapporteur
 
@@ -98,7 +100,8 @@ def pomper(acq, duree: float, arret=None):
 
 
 def lancer_simulateur(port: int, **kwargs) -> tuple[Simulateur, threading.Thread]:
-    sim = Simulateur(adresse='127.0.0.1', port=port, bed_label='SALLE1', **kwargs)
+    kwargs.setdefault('bed_label', 'SALLE1')
+    sim = Simulateur(adresse='127.0.0.1', port=port, **kwargs)
     fil = threading.Thread(target=sim.demarrer, daemon=True)
     fil.start()
     assert sim.demarre.wait(2.0)

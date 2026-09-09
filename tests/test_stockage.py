@@ -149,11 +149,22 @@ def test_volume_sans_marqueur_refuse(tmp_path):
         V.verifier(tmp_path, site='HEGP', salle='SALLE1')
 
 
-def test_volume_d_une_autre_salle_refuse(tmp_path):
+def test_changement_de_salle_autorise(tmp_path):
+    """
+    Le Pi est mobile : on le débranche d'une salle pour le rebrancher dans une
+    autre, et son disque le suit. Un changement de salle n'est donc PAS une
+    erreur — chaque session porte la sienne, rien ne se mélange.
+    """
     V.ecrire_marqueur(tmp_path, site='HEGP', salle='SALLE1')
-    V.verifier(tmp_path, site='HEGP', salle='SALLE1')          # celui-ci passe
-    with pytest.raises(V.VolumeInvalide, match='salle'):
-        V.verifier(tmp_path, site='HEGP', salle='SALLE2')
+    V.verifier(tmp_path, site='HEGP', salle='SALLE1')
+    V.verifier(tmp_path, site='HEGP', salle='SALLE2')      # ne doit pas lever
+
+
+def test_volume_d_un_autre_site_refuse(tmp_path):
+    """Le site, en revanche, ne suit pas le Pi : c'est une autre installation."""
+    V.ecrire_marqueur(tmp_path, site='HEGP', salle='SALLE1')
+    with pytest.raises(V.VolumeInvalide, match='site'):
+        V.verifier(tmp_path, site='COCHIN', salle='SALLE1')
 
 
 def test_volume_sature_refuse(tmp_path):

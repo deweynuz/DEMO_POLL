@@ -32,15 +32,22 @@ class ErreurConfiguration(Exception):
 @dataclass
 class Site:
     nom: str
-    salle: str
+    #: Vide = la salle est celle qu'annonce le moniteur. Ne renseigner que
+    #: pour forcer un nom, quand l'étiquette de lit est fantaisiste.
+    salle: str = ''
 
 
 @dataclass
 class Moniteur:
+    #: Vide = le moniteur est appris automatiquement. Ne renseigner que pour
+    #: épingler un appareil précis.
     mac: str = ''
     bed_label: str = ''
     ip: str = ''
     verifier_bed_label: bool = True
+    #: Apprendre le moniteur quand aucun n'est configuré, et le réapprendre
+    #: quand celui qui est mémorisé a disparu du segment.
+    appairage_auto: bool = True
 
 
 @dataclass
@@ -110,7 +117,8 @@ class Configuration:
 
 _SECTIONS = {
     'site':         {'nom', 'salle'},
-    'moniteur':     {'mac', 'bed_label', 'ip', 'verifier_bed_label'},
+    'moniteur':     {'mac', 'bed_label', 'ip', 'verifier_bed_label',
+                     'appairage_auto'},
     'acquisition':  {'periode_numerics_s', 'periode_demographiques_s', 'courbes',
                      'ondes', 'mtu', 'intervention_auto', 'refuser_mode_demo'},
     'surveillance': {'silence_donnees_s', 'echecs_avant_alerte', 'seuil_disque_mo',
@@ -145,16 +153,11 @@ def valider(brut: dict) -> Configuration:
     site = brut.get('site', {})
     if not site.get('nom'):
         problemes.append("[site] nom est obligatoire (ex. « HEGP »)")
-    if not site.get('salle'):
-        problemes.append("[site] salle est obligatoire (ex. « SALLE1 ») — "
-                         "il identifie les données de ce Pi parmi les autres")
-
     mon = brut.get('moniteur', {})
     mac, ip = (mon.get('mac') or '').lower(), mon.get('ip') or ''
-    if not mac and not ip:
-        problemes.append("[moniteur] il faut mac ou ip. La MAC est préférable : "
-                         "le Pi est serveur DHCP, il résout l'adresse lui-même, "
-                         "et le moniteur reste identifié s'il change d'IP")
+    if not mac and not ip and not mon.get('appairage_auto', True):
+        problemes.append("[moniteur] appairage_auto = false exige mac ou ip. "
+                         "Sinon le Pi ne saurait à qui parler.")
     if mac and not _MAC.match(mac):
         problemes.append(f"[moniteur] mac invalide : {mac!r} (format 00:09:fb:xx:xx:xx)")
     if ip and (not _IPV4.match(ip) or any(int(o) > 255 for o in ip.split('.'))):
@@ -217,9 +220,10 @@ def valider(brut: dict) -> Configuration:
             "configuration invalide :\n" + '\n'.join(f"  - {p}" for p in problemes))
 
     return Configuration(
-        site=Site(nom=site['nom'], salle=site['salle']),
+        site=Site(nom=site['nom'], salle=site.get('salle', '') or ''),
         moniteur=Moniteur(mac=mac, bed_label=mon.get('bed_label', ''), ip=ip,
-                          verifier_bed_label=mon.get('verifier_bed_label', True)),
+                          verifier_bed_label=mon.get('verifier_bed_label', True),
+                          appairage_auto=bool(mon.get('appairage_auto', True))),
         acquisition=Acquisition(
             periode_numerics_s=float(periode),
             periode_demographiques_s=float(acq.get('periode_demographiques_s', 30.0)),

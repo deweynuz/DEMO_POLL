@@ -27,7 +27,7 @@ import socket
 import time
 from datetime import datetime, timezone
 
-from . import adressage
+from . import adressage, appairage
 from .config import Configuration
 from .controle import FileCommandes
 from .etat import RapporteurEtat
@@ -67,8 +67,14 @@ class Acquisition:
 
     def __init__(self, config: Configuration, base: Base, rapporteur: RapporteurEtat,
                  *, horloge=time.monotonic, chemin_baux=adressage.BAUX_DNSMASQ,
-                 interface: str = 'eth0', commandes: FileCommandes | None = None):
+                 interface: str = 'eth0', commandes: FileCommandes | None = None,
+                 port_moniteur: int = C.PORT_MONITEUR,
+                 port_local: int = C.PORT_LOCAL,
+                 consulter_arp: bool = True):
         self.config = config
+        self.port_moniteur = port_moniteur
+        self.port_local = port_local
+        self.consulter_arp = consulter_arp
         self.commandes = commandes
         self.base = base
         self.rapporteur = rapporteur
@@ -85,6 +91,11 @@ class Acquisition:
 
         self.sock: socket.socket | None = None
         self.adresse: str = ''
+        #: Moniteur appris, mémorisé dans le volume de données. C'est lui qui
+        #: donne la salle : le Pi change de bloc, la salle suit l'appareil.
+        self.moniteur: appairage.Moniteur | None = (
+            appairage.charger(config.stockage.chemin)
+            if config.moniteur.appairage_auto else None)
         self.session_id: int | None = None
         self.intervention_id: int | None = None
         self.code_intervention: str | None = None
@@ -126,6 +137,19 @@ class Acquisition:
 
     # ── utilitaires ─────────────────────────────────────────────────────────
 
+    @property
+    def salle(self) -> str:
+        """
+        La salle vient du moniteur, pas d'un fichier : le Pi est déplacé d'un
+        bloc à l'autre et doit suivre. Une valeur en configuration force le nom
+        quand l'étiquette de lit est absente ou fantaisiste.
+        """
+        if self.config.site.salle:
+            return self.config.site.salle
+        if self.moniteur:
+            return self.moniteur.salle
+        return 'inconnue'
+
     def _prochain_invoke(self) -> int:
         self._invoke = (self._invoke % 0xFFFE) + 1
         return self._invoke
@@ -140,19 +164,28 @@ class Acquisition:
 
     def _envoyer(self, donnees: bytes):
         if self.sock and self.adresse:
-            self.sock.sendto(donnees, (self.adresse, C.PORT_MONITEUR))
+            self.sock.sendto(donnees, (self.adresse, self.port_moniteur))
 
     # ── cycle de vie ────────────────────────────────────────────────────────
 
     def ouvrir_socket(self):
+        """
+        PAS de SO_REUSEADDR : en UDP il autoriserait deux sockets à se lier au
+        même port, et les datagrammes du moniteur seraient répartis entre eux
+        au hasard. Deux instances du service se voleraient la moitié des
+        mesures, chacune croyant fonctionner. Constaté le 09/09/2026 : une
+        suite de tests lancée pendant que le service tournait recevait des
+        paquets du vrai moniteur. Mieux vaut un échec franc au démarrage.
+        """
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.settimeout(0.2)
         try:
-            self.sock.bind(('', C.PORT_LOCAL))
+            self.sock.bind(('', self.port_local))
         except OSError as e:
-            log.warning("port %d indisponible (%s) : port éphémère", C.PORT_LOCAL, e)
-            self.sock.bind(('', 0))
+            raise RuntimeError(
+                f"port {self.port_local} déjà utilisé ({e}). Une autre instance "
+                f"du service tourne-t-elle ? « sudo ss -lunp | grep {self.port_local} »"
+            ) from e
 
     def fermer(self, motif: str = 'arrêt'):
         if self.session_id is not None:
@@ -171,7 +204,7 @@ class Acquisition:
         if self.intervention_id is not None:
             self.arreter_intervention()
         self.intervention_id = self.base.ouvrir_intervention(
-            code, site=self.config.site.nom, salle=self.config.site.salle,
+            code, site=self.config.site.nom, salle=self.salle,
             courbes=self.config.acquisition.courbes if courbes is None else courbes,
             ouverture=ouverture)
         self.code_intervention = code
@@ -210,7 +243,7 @@ class Acquisition:
                   f"{self.code_intervention}_{_utc()[:19].replace(':', '')}.h5")
         self.ecrivain_courbes = EcrivainCourbes(
             chemin, intervention=self.code_intervention,
-            site=self.config.site.nom, salle=self.config.site.salle,
+            site=self.config.site.nom, salle=self.salle,
             session_id=self.session_id, debut_utc=_utc(),
             moniteur_reltime=session['moniteur_reltime'] if session else None,
             moniteur_datetime_utc=(session['moniteur_datetime_utc'] or '') if session else '',
@@ -350,7 +383,7 @@ class Acquisition:
                       "Les signaux qu'il produit sont fabriqués : ce ne sont PAS "
                       "des données patient.", self.adresse, mds.mode_operation)
         self.session_id = self.base.ouvrir_session(
-            site=self.config.site.nom, salle=self.config.site.salle,
+            site=self.config.site.nom, salle=self.salle,
             moniteur_ip=self.adresse, moniteur_mac=self.config.moniteur.mac,
             bed_label=mds.bed_label, system_id=mds.system_id, modele=mds.modele,
             courbes_negociees=int(self.courbes_negociees),
@@ -522,7 +555,17 @@ class Acquisition:
         if self.machine.etat is not Etat.ASSOCIATION:
             return
 
+        # Épinglée en configuration : discordance = refus. Sinon l'étiquette
+        # est une information qu'on suit, pas une contrainte — le Pi change de
+        # salle, et un moniteur peut être ré-étiqueté.
         attendu = self.config.moniteur.bed_label
+        if (self.moniteur and not attendu
+                and (mds.bed_label or '') != self.moniteur.bed_label):
+            log.info("Étiquette de lit du moniteur %s : %r -> %r",
+                     self.moniteur.mac, self.moniteur.bed_label, mds.bed_label)
+            self.moniteur.bed_label = mds.bed_label or ''
+            appairage.memoriser(self.config.stockage.chemin, self.moniteur)
+            self.rapporteur.mettre_a_jour(salle=self.salle)
         if self.config.moniteur.verifier_bed_label and attendu and mds.bed_label != attendu:
             self.rapporteur.mettre_a_jour(
                 moniteur_conforme=False,
@@ -740,14 +783,91 @@ class Acquisition:
                 self._demander_poll_etendu()
             self._keepalive(maintenant)
 
+    def _resoudre_moniteur(self) -> str | None:
+        """
+        Trois cas, dans l'ordre :
+          1. une MAC ou une IP est épinglée en configuration : on l'utilise ;
+          2. un moniteur a été appris et il est toujours sur le segment ;
+          3. sinon, on appaire — c'est le cas du Pi qu'on vient de rebrancher
+             dans une autre salle.
+        """
+        if self.config.moniteur.mac or self.config.moniteur.ip:
+            return adressage.resoudre(
+                mac=self.config.moniteur.mac, ip=self.config.moniteur.ip,
+                interface=self.interface, chemin_baux=self.chemin_baux,
+                consulter_arp=self.consulter_arp)
+
+        if self.moniteur:
+            try:
+                adresse = adressage.resoudre(
+                    mac=self.moniteur.mac, interface=self.interface,
+                    chemin_baux=self.chemin_baux,
+                    consulter_arp=self.consulter_arp)
+                if adresse != self.moniteur.ip:
+                    log.info("Le moniteur %s a changé d'adresse : %s -> %s",
+                             self.moniteur.mac, self.moniteur.ip, adresse)
+                    self.moniteur.ip = adresse
+                    appairage.memoriser(self.config.stockage.chemin, self.moniteur)
+                return adresse
+            except adressage.AdresseIntrouvable:
+                log.warning("Le moniteur appris (%s, salle %r) n'est plus sur le "
+                            "segment. Nouvel appairage.",
+                            self.moniteur.mac, self.moniteur.salle)
+                self._changer_de_moniteur(None)
+
+        if not self.config.moniteur.appairage_auto:
+            raise adressage.AdresseIntrouvable(
+                "aucun moniteur configuré et appairage_auto = false")
+
+        candidats = appairage.appairer(interface=self.interface,
+                                       chemin_baux=self.chemin_baux,
+                                       port=self.port_moniteur,
+                                       consulter_arp=self.consulter_arp)
+        choisi = appairage.choisir(candidats)
+        if choisi is None:
+            raise adressage.AdresseIntrouvable(
+                "aucun moniteur n'a accepté d'association Data Export"
+                if not candidats else "plusieurs moniteurs candidats")
+        self._changer_de_moniteur(choisi)
+        return choisi.ip
+
+    def _changer_de_moniteur(self, nouveau: appairage.Moniteur | None):
+        """
+        Un autre moniteur, donc une autre salle et un autre patient :
+        l'intervention en cours doit être close, pas prolongée.
+        """
+        ancien = self.moniteur
+        if self.intervention_id is not None:
+            log.warning("Changement de moniteur : clôture de %s", self.code_intervention)
+            self.arreter_intervention()
+        self.empreinte_patient = None
+        self.demographiques = None
+        self.moniteur = nouveau
+        if nouveau is None:
+            appairage.oublier(self.config.stockage.chemin)
+            return
+        appairage.memoriser(self.config.stockage.chemin, nouveau)
+        if ancien is None or ancien.mac != nouveau.mac:
+            log.warning("Moniteur appairé : %s (%s), salle %r, %s",
+                        nouveau.mac, nouveau.ip, nouveau.salle,
+                        nouveau.modele or 'modèle inconnu')
+            self.base.enregistrer_evenement(
+                niveau='WARNING',
+                message=f"appairage : {nouveau.mac} ({nouveau.ip}), salle "
+                        f"{nouveau.salle!r}")
+        self.rapporteur.mettre_a_jour(salle=self.salle,
+                                      moniteur_bed_label=nouveau.bed_label)
+
     def _tenter_association(self):
         try:
-            self.adresse = adressage.resoudre(
-                mac=self.config.moniteur.mac, ip=self.config.moniteur.ip,
-                interface=self.interface, chemin_baux=self.chemin_baux)
+            adresse = self._resoudre_moniteur()
         except adressage.AdresseIntrouvable as e:
-            self.machine.abandonner(f"adresse introuvable : {e}")
+            self.machine.abandonner(f"aucun moniteur : {e}")
             return
+        if adresse is None:
+            self.machine.abandonner("aucun moniteur")
+            return
+        self.adresse = adresse
         self.machine.transition(Etat.ASSOCIATION, f"Association Request -> {self.adresse}")
         self._t_demande_assoc = self.horloge()
         self._envoyer(T.construire_assoc_request(
@@ -823,7 +943,7 @@ class Acquisition:
         self.empreinte_patient = demo.identifiant
         code = self._prochain_code_recherche()
         self.intervention_id = self.base.ouvrir_intervention(
-            code, site=self.config.site.nom, salle=self.config.site.salle,
+            code, site=self.config.site.nom, salle=self.salle,
             courbes=self.config.acquisition.courbes, ouverture='auto',
             empreinte_patient=demo.identifiant,
             demonstration=C.en_demonstration(self.mode_operation))
@@ -840,7 +960,7 @@ class Acquisition:
 
     def _prochain_code_recherche(self) -> str:
         annee = datetime.now(timezone.utc).year
-        prefixe = f"{self.config.site.nom}-{self.config.site.salle}-{annee}-"
+        prefixe = f"{self.config.site.nom}-{self.salle}-{annee}-"
         dernier = self.base.conn.execute(
             "SELECT code_recherche FROM interventions WHERE code_recherche LIKE ? "
             "ORDER BY code_recherche DESC LIMIT 1", (prefixe + '%',)).fetchone()

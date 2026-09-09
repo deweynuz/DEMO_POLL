@@ -60,9 +60,14 @@ def voisinage(interface: str = 'eth0') -> dict[str, str]:
 
 
 def resoudre(*, mac: str = '', ip: str = '', interface: str = 'eth0',
-             chemin_baux: Path = BAUX_DNSMASQ) -> str:
+             chemin_baux: Path = BAUX_DNSMASQ,
+             consulter_arp: bool = True) -> str:
     """
     Renvoie l'adresse à contacter. Une IP explicitement configurée l'emporte.
+
+    `consulter_arp` permet de s'en tenir au fichier de baux. Les tests le
+    mettent à False : sans cela ils retombent sur la table ARP de la machine
+    et émettent du trafic vers de vrais moniteurs cliniques.
     """
     if ip:
         return ip
@@ -73,12 +78,14 @@ def resoudre(*, mac: str = '', ip: str = '', interface: str = 'eth0',
     table = baux(chemin_baux)
     if mac in table:
         return table[mac]
-    table = voisinage(interface)
-    if mac in table:
-        log.info("%s résolue par la table ARP (absente des baux dnsmasq)", mac)
-        return table[mac]
+    if consulter_arp:
+        table = voisinage(interface)
+        if mac in table:
+            log.info("%s résolue par la table ARP (absente des baux dnsmasq)", mac)
+            return table[mac]
 
-    connues = sorted(set(baux(chemin_baux)) | set(voisinage(interface)))
+    connues = sorted(set(baux(chemin_baux))
+                     | (set(voisinage(interface)) if consulter_arp else set()))
     philips = [m for m in connues if m.startswith(OUI_PHILIPS)]
     raise AdresseIntrouvable(
         f"MAC {mac} absente des baux dnsmasq et de la table ARP. "
@@ -87,7 +94,8 @@ def resoudre(*, mac: str = '', ip: str = '', interface: str = 'eth0',
 
 
 def inventaire(interface: str = 'eth0',
-               chemin_baux: Path = BAUX_DNSMASQ) -> list[tuple[str, str, str]]:
+               chemin_baux: Path = BAUX_DNSMASQ,
+               consulter_arp: bool = True) -> list[tuple[str, str, str]]:
     """
     [(mac, ip, origine)] des moniteurs Philips visibles. Sert à l'outil de
     réglage et au message d'erreur ci-dessus — jamais à choisir tout seul.
@@ -96,7 +104,8 @@ def inventaire(interface: str = 'eth0',
     for mac, adresse in baux(chemin_baux).items():
         if mac.startswith(OUI_PHILIPS):
             vus[mac] = (adresse, 'bail dnsmasq')
-    for mac, adresse in voisinage(interface).items():
-        if mac.startswith(OUI_PHILIPS) and mac not in vus:
-            vus[mac] = (adresse, 'table ARP')
+    if consulter_arp:
+        for mac, adresse in voisinage(interface).items():
+            if mac.startswith(OUI_PHILIPS) and mac not in vus:
+                vus[mac] = (adresse, 'table ARP')
     return sorted((mac, a, o) for mac, (a, o) in vus.items())
