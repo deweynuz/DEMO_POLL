@@ -149,8 +149,13 @@ class RapporteurEtat:
 
     def __init__(self, chemin: Path, *, site: str = '', salle: str = '',
                  version: str = '', notificateur: NotificateurSystemd | None = None,
-                 horloge=time.monotonic):
+                 horloge=time.monotonic, chemin_donnees: Path | None = None):
         self.chemin = Path(chemin)
+        # L'espace libre rapporté est celui du VOLUME DE DONNÉES, pas celui du
+        # répertoire où vit status.json : ce dernier est sous /run, un tmpfs de
+        # quelques centaines de mégaoctets. Mesurer le mauvais système de
+        # fichiers ferait surveiller une valeur sans rapport avec le risque.
+        self.chemin_donnees = Path(chemin_donnees) if chemin_donnees else self.chemin.parent
         self.horloge = horloge
         self.notificateur = notificateur or NotificateurSystemd()
         self.etat = Etat(site=site, salle=salle, version=version)
@@ -203,7 +208,7 @@ class RapporteurEtat:
         self.etat.silence_donnees_s = (
             round(s, 1) if (s := self.silence_donnees_s()) is not None else None)
         try:
-            usage = shutil.disk_usage(self.chemin.parent)
+            usage = shutil.disk_usage(self.chemin_donnees)
             self.etat.disque_libre_mo = usage.free // (1024 * 1024)
         except OSError:
             self.etat.disque_libre_mo = -1

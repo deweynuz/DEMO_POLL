@@ -243,3 +243,26 @@ def test_intervention_reprise_apres_redemarrage(acquisition, tmp_path):
         "un second enregistrement aurait coupé le cas en deux"
     assert base2.conn.execute(
         "SELECT count(*) FROM lacunes WHERE type='service_redemarre'").fetchone()[0] == 1
+
+
+def test_espace_libre_mesure_le_volume_de_donnees(tmp_path):
+    """
+    status.json vit sous /run (tmpfs de quelques centaines de Mo) tandis que
+    les données vont sur un tout autre système de fichiers. Mesurer celui de
+    status.json ferait surveiller une valeur sans rapport avec le risque —
+    constaté en production le 09/09/2026 : 742 Mo affichés pour 20 540 réels.
+    """
+    import shutil
+    from mx800.etat import RapporteurEtat
+
+    donnees = tmp_path / 'donnees'
+    donnees.mkdir()
+    etat = tmp_path / 'run' / 'status.json'
+    rapporteur = RapporteurEtat(etat, chemin_donnees=donnees)
+    rapporteur.ecrire()
+    attendu = shutil.disk_usage(donnees).free // (1024 * 1024)
+    assert abs(rapporteur.etat.disque_libre_mo - attendu) <= 2
+
+    # sans chemin_donnees, on retombe sur le répertoire de status.json
+    defaut = RapporteurEtat(tmp_path / 'run2' / 'status.json')
+    assert defaut.chemin_donnees == (tmp_path / 'run2')

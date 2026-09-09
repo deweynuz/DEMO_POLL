@@ -76,7 +76,8 @@ def executer(chemin_config: Path, *, sans_page: bool = False,
     base = Base(cfg.base, version_module=VERSION, git_commit=_version_git())
     rapporteur = RapporteurEtat(cfg.chemin_etat, site=cfg.site.nom,
                                 salle=cfg.site.salle, version=VERSION,
-                                notificateur=notificateur)
+                                notificateur=notificateur,
+                                chemin_donnees=cfg.stockage.chemin)
     commandes = FileCommandes()
     acquisition = Acquisition(cfg, base, rapporteur, commandes=commandes)
 
