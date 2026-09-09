@@ -29,10 +29,12 @@ from datetime import datetime, timezone
 
 from . import adressage
 from .config import Configuration
+from .controle import FileCommandes
 from .etat import RapporteurEtat
 from .machine import Etat, MachineEtats
 from .protocole import constantes as C, decodage as D, trames as T
 from .protocole import ondes as CAT
+from .protocole import parametres as PARAM
 from .stockage.base import Base, BaseIdentites
 from .stockage.courbes import EcrivainCourbes
 
@@ -65,8 +67,9 @@ class Acquisition:
 
     def __init__(self, config: Configuration, base: Base, rapporteur: RapporteurEtat,
                  *, horloge=time.monotonic, chemin_baux=adressage.BAUX_DNSMASQ,
-                 interface: str = 'eth0'):
+                 interface: str = 'eth0', commandes: FileCommandes | None = None):
         self.config = config
+        self.commandes = commandes
         self.base = base
         self.rapporteur = rapporteur
         self.horloge = horloge
@@ -115,6 +118,11 @@ class Acquisition:
         self.empreinte_patient: str | None = None
         self.mode_operation: int | None = None
         self._t_dernier_demog = 0.0
+
+        # Reprise après redémarrage. Le watchdog de données peut faire
+        # redémarrer le service EN PLEINE INTERVENTION : sans reprise, le cas
+        # serait coupé en deux enregistrements distincts.
+        self._reprendre_intervention_ouverte()
 
     # ── utilitaires ─────────────────────────────────────────────────────────
 
@@ -309,6 +317,21 @@ class Acquisition:
             courbes_negociees=False,
             alerte=f"courbes coupées : {motif} — numerics maintenus")
 
+    def _reprendre_intervention_ouverte(self):
+        ouverte = self.base.intervention_ouverte()
+        if ouverte is None:
+            return
+        self.intervention_id = ouverte['id']
+        self.code_intervention = ouverte['code_recherche']
+        self.empreinte_patient = ouverte['empreinte_patient']
+        self.rapporteur.mettre_a_jour(intervention=self.code_intervention)
+        log.warning("Reprise de l'intervention %s, restée ouverte lors du dernier "
+                    "arrêt. Les données vont s'y ajouter plutôt que d'ouvrir un "
+                    "second enregistrement.", self.code_intervention)
+        self.base.enregistrer_lacune(
+            type='service_redemarre', intervention_id=self.intervention_id,
+            detail=f"reprise de {self.code_intervention} après arrêt du service")
+
     # ── sessions ────────────────────────────────────────────────────────────
 
     def _ouvrir_session(self, mds: D.MdsCreate):
@@ -369,8 +392,52 @@ class Acquisition:
             self.fermer()
 
     def tick(self):
+        self._traiter_commandes()
         self._recevoir()
         self._echeances()
+
+    def _traiter_commandes(self):
+        """
+        Les commandes déposées par le serveur HTTP sont exécutées ICI, dans le
+        fil de la boucle. Aucun autre fil ne touche à l'état d'acquisition.
+        """
+        if self.commandes is None:
+            return
+        while (commande := self.commandes.retirer()) is not None:
+            try:
+                self._executer_commande(commande)
+            except Exception as e:                        # noqa: BLE001
+                log.exception("commande %s en échec", commande.action)
+                commande.repondre(False, f"{type(e).__name__} : {e}")
+
+    def _executer_commande(self, commande):
+        action = commande.action
+        if action == 'demarrer':
+            if self.intervention_id is not None:
+                commande.repondre(False, f"intervention {self.code_intervention} "
+                                         f"déjà en cours")
+                return
+            if self.machine.etat not in (Etat.ASSOCIE, Etat.ACQUISITION):
+                commande.repondre(False, f"moniteur non associé (état "
+                                         f"{self.machine.etat})")
+                return
+            if (self.config.acquisition.refuser_mode_demo
+                    and C.en_demonstration(self.mode_operation)):
+                commande.repondre(False, "moniteur en mode démonstration : "
+                                         "enregistrement refusé")
+                return
+            code = commande.parametres.get('code') or self._prochain_code_recherche()
+            self.demarrer_intervention(code, ouverture='manuelle')
+            commande.repondre(True, f"intervention {code} démarrée", code=code)
+        elif action == 'arreter':
+            if self.intervention_id is None:
+                commande.repondre(False, "aucune intervention en cours")
+                return
+            code = self.code_intervention
+            self.arreter_intervention()
+            commande.repondre(True, f"intervention {code} arrêtée", code=code)
+        else:
+            commande.repondre(False, f"action inconnue : {action}")
 
     # ── réception ───────────────────────────────────────────────────────────
 
@@ -518,11 +585,14 @@ class Acquisition:
         if self.intervention_id is None:
             return          # veille assumée : on interroge, on n'archive pas
         for v in valeurs:
-            catalogue = CAT.CATALOGUE.get(v.physio_id)
+            # Nom court issu du catalogue (HR, SpO2, ABPs...). None si l'identifiant
+            # est inconnu : la mesure est conservée quand même, avec son physio_id
+            # brut — c'est la raison d'être du format long.
+            connu = PARAM.CATALOGUE.get(v.physio_id)
             self.base.empiler_mesure(
                 session_id=self.session_id, intervention_id=self.intervention_id,
                 ts_utc=horodatage, physio_id=v.physio_id,
-                parametre=catalogue.nom if catalogue else None,
+                parametre=connu.court if connu else None,
                 valeur=v.valeur, unite=v.unit_code, etat=v.etat, valide=v.valide)
         ecrites = self.base.vider_lot()
         if not ecrites:
