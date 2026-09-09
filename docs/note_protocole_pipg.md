@@ -273,3 +273,70 @@ Hors contexte. Cause documentée d'échantillons manquants : trop d'objets Wave 
 | Keep-alive absent | `min_poll_period` = 312 ms → timeout 10 s | p. 70, 63 |
 | `sequence_no` ignoré | aucune détection de perte possible | p. 62 |
 | Fréquence supposée | `NOM_ATTR_TIME_PD_SAMP` jamais lu | p. 84 |
+
+---
+
+## 7. Correspondance code → page
+
+Chaque structure binaire manipulée par le module, et l'endroit du guide dont
+elle est tirée. Une entrée absente de cette table est une structure non tracée :
+elle ne doit pas exister dans le code.
+
+### Construction (`mx800/protocole/trames.py`)
+
+| Fonction | Structure | Page |
+|---|---|---|
+| `encoder_float` | FLOAT-Type | 40-41 |
+| `encoder_chaine` | chaîne préfixée de sa longueur | 40 |
+| `_longueur_asn` | ASNLength | 68 |
+| `_SESSION_DATA`, `_PRES_HEADER_REQ` | blocs ASN.1 de l'Association Request | 298 |
+| `_PRES_HEADER_RSP` | blocs ASN.1 de l'Association Response | 299 |
+| `construire_user_data` | MDSEUserInfoStd, PollProfileSupport, PollProfileExt | 68-71, exemple 304 |
+| `construire_assoc_request` | Association Request | 67-68 |
+| `construire_assoc_response` | Association Response | 73 |
+| `_roiv` / `_rors` / `_rolrs` | ROIVapdu / RORSapdu / ROLRSapdu | 43-44 |
+| `_action` | ActionArgument (avec `u_32 scope`) | 49 |
+| `construire_poll_request` | SINGLE POLL DATA REQUEST | 55-56 |
+| `construire_poll_request_etendu` | PollMdibDataReqExt, PollDataReqPeriod | 59-60 |
+| `construire_keep_alive` | Poll sur l'Alert Monitor, contexte statique | 63 |
+| `construire_mds_create_result` | confirmation du MDS Create Event | 111 |
+| `construire_get_liste_priorite` | GetArgument (avec `scope`) | 50, 63 |
+| `construire_set_liste_priorite` | SetArgument, ModificationList, TextIdList | 51, 64 |
+| `encoder_nu_obs_value(_cmp)` | NuObsValue, NuObsValueCmp | 76-77 |
+| `encoder_sa_obs_value(_cmp)` | SaObsValue, SaObsValueCmp | 87-88 |
+| `encoder_scale_range_spec16` | ScaleRangeSpec16 | 86 |
+| `encoder_sa_spec` | SaSpec, SampleType, SaFlags | 83 |
+| `encoder_masques_qualite` | SaFixedValSpec16 | 83-84 |
+| `construire_serie_poll_result` | chaînage ROLRS puis RORS terminal | 44, 58 |
+
+### Décodage (`mx800/protocole/decodage.py`)
+
+| Fonction | Structure | Page |
+|---|---|---|
+| `type_message` | en-têtes de session | 72-73 |
+| `decoder_apdu` | ROIV/RORS/ROLRS, RorlsId | 43-44 |
+| `decoder_liste_attributs` | AttributeList, AVAType | recoupée sur trame réelle |
+| `decoder_mds_create` | EventReportArgument, MDSCreateInfo | 111 |
+| `decoder_reponse_association` | User Data, options négociées | 72-73 |
+| `decoder_resultat_poll` | PollMdibDataReply(Ext), PollInfoList, SingleContextPoll, ObservationPoll | 56-58, 62 |
+| `decoder_valeur_numerique(_composees)` | NuObsValue, NuObsValueCmp, MeasurementState | 76-77 |
+| `decoder_sa_obs_value(_cmp)` | SaObsValue, SaObsValueCmp | 87-88 |
+| `decoder_sa_spec` | SaSpec | 83 |
+| `decoder_calibration` | ScaleRangeSpec16 | 86 |
+| `decoder_masques_qualite` | SaFixedValSpec16 | 83-84 |
+| `decoder_temps_absolu` | AbsoluteTime (0xff = non supporté) | 62 |
+
+### Catalogue (`mx800/protocole/ondes.py`)
+
+55 ondes extraites automatiquement des tables « Waves », p. 179-188.
+Règle `label = 0x00020000 | physio_id` vérifiée pour chaque entrée.
+
+### Points où le comportement réel s'écarte du guide
+
+Constatés sur le moniteur SALLE1 le 09/09/2026, et reproduits par le simulateur :
+
+| Constat | Guide |
+|---|---|
+| `max_mtu_tx` renvoyé à **1456** | maximum annoncé 1364 (p. 71) |
+| Release non honoré tant que le MDS Create n'est pas confirmé | p. 72 ne le précise pas |
+| MDS Create ré-émis 3 fois puis ABORT à ~10 s | conséquence du timeout p. 70 |
