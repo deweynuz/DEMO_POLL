@@ -34,6 +34,7 @@ from .machine import Etat, MachineEtats
 from .protocole import constantes as C, decodage as D, trames as T
 from .protocole import ondes as CAT
 from .stockage.base import Base
+from .stockage.courbes import EcrivainCourbes
 
 log = logging.getLogger('mx800.acquisition')
 
@@ -43,6 +44,13 @@ ATTR_NU_CMPD_VAL_OBS = 0x0951
 
 DELAI_REPONSE_ASSOC_S = 5.0     # au-delà, on considère la demande perdue
 MARGE_KEEPALIVE       = 0.4     # fraction du timeout négocié
+
+#: Durée demandée dans PollDataReqPeriod (PIPG p. 60). La requête doit être
+#: renouvelée AVANT expiration (p. 61) ; on la renouvelle à la moitié.
+PERIODE_ACTIVE_POLL_ETENDU_S = 30.0
+#: Nombre de dégradations tolérées avant de couper les courbes. La perte des
+#: courbes ne doit JAMAIS faire tomber les numerics.
+ECHECS_COURBES_AVANT_COUPURE = 3
 
 
 def _utc() -> str:
@@ -90,6 +98,16 @@ class Acquisition:
         self._echecs_watchdog = 0
         self._en_cours: dict[int, list] = {}     # invoke_id -> mesures accumulées
         self._horodatage_lot: dict[int, str] = {}
+
+        # courbes
+        self.ecrivain_courbes: EcrivainCourbes | None = None
+        self.courbes_actives = False
+        self.ondes_demandees: list[int] = []
+        self.ondes_effectives: list[int] | None = None
+        self._t_poll_etendu = 0.0
+        self._sequence_attendue: int | None = None
+        self._echecs_courbes = 0
+        self._masques_par_canal: dict[int, dict[int, int]] = {}
 
     # ── utilitaires ─────────────────────────────────────────────────────────
 
@@ -143,17 +161,145 @@ class Acquisition:
         self.code_intervention = code
         self.rapporteur.mettre_a_jour(intervention=code)
         log.info("Intervention %s démarrée (%s)", code, ouverture)
+        veut_courbes = self.config.acquisition.courbes if courbes is None else courbes
+        if veut_courbes:
+            self._ouvrir_courbes()
         return self.intervention_id
 
     def arreter_intervention(self):
         if self.intervention_id is None:
             return
         self.base.vider_lot()
+        self._fermer_courbes()
         self.base.fermer_intervention(self.intervention_id)
         log.info("Intervention %s terminée", self.code_intervention)
         self.intervention_id = None
         self.code_intervention = None
         self.rapporteur.mettre_a_jour(intervention=None)
+
+    # ── courbes ─────────────────────────────────────────────────────────────
+
+    def _ouvrir_courbes(self):
+        if self.ecrivain_courbes is not None or not self.code_intervention:
+            return
+        if not self.courbes_negociees:
+            log.warning("Courbes demandées pour %s mais non négociées avec le "
+                        "moniteur : seuls les numerics seront enregistrés.",
+                        self.code_intervention)
+            return
+        session = self.base.conn.execute(
+            "SELECT moniteur_reltime, moniteur_datetime_utc, ecart_horloge_s "
+            "FROM sessions WHERE id=?", (self.session_id,)).fetchone()
+        chemin = (self.config.courbes_dir /
+                  f"{self.code_intervention}_{_utc()[:19].replace(':', '')}.h5")
+        self.ecrivain_courbes = EcrivainCourbes(
+            chemin, intervention=self.code_intervention,
+            site=self.config.site.nom, salle=self.config.site.salle,
+            session_id=self.session_id, debut_utc=_utc(),
+            moniteur_reltime=session['moniteur_reltime'] if session else None,
+            moniteur_datetime_utc=(session['moniteur_datetime_utc'] or '') if session else '',
+            ecart_horloge_s=session['ecart_horloge_s'] if session else None)
+        log.info("Courbes -> %s", chemin)
+        self._demander_liste_ondes()
+        # Le contexte statique arrive normalement multiplexé, un objet par
+        # 1024 ms (p. 287). On le demande explicitement pour connaître tout de
+        # suite la période d'échantillonnage de chaque onde : sans elle, les
+        # premiers blocs seraient jetés — on ne stocke pas un signal dont on
+        # ignore la fréquence (p. 84).
+        self._envoyer(T.construire_poll_request(
+            self._prochain_invoke(), C.NOM_MOC_VMO_METRIC_SA_RT,
+            C.NOM_ATTR_GRP_VMO_STATIC))
+        self._demander_poll_etendu(force=True)
+
+    def _fermer_courbes(self):
+        if self.ecrivain_courbes is None:
+            return
+        stats = self.ecrivain_courbes.fermer(fin_utc=_utc())
+        chemin = self.ecrivain_courbes.chemin
+        octets = chemin.stat().st_size if chemin.exists() else 0
+        self.base.enregistrer_fichier_courbes(
+            intervention_id=self.intervention_id, session_id=self.session_id,
+            chemin=str(chemin), fin_utc=_utc(), octets=octets,
+            canaux=','.join(stats))
+        for nom, s in stats.items():
+            log.info("Courbe %s : %d échantillons, %d manquants, complétude %.2f %%",
+                     nom, s['echantillons'], s['manquants'], s['completude'])
+        self.ecrivain_courbes = None
+        self._sequence_attendue = None
+
+    def _demander_liste_ondes(self):
+        """
+        SET PRIORITY LIST puis GET pour relire la liste EFFECTIVE (PIPG p. 63-64).
+        Le moniteur ignore silencieusement les entrées invalides ou en excès
+        (p. 287) : sans relecture, on croirait avoir demandé ce qu'on n'a pas.
+        """
+        self.ondes_demandees = self.config.physio_ids_ondes
+        if not self.ondes_demandees:
+            return
+        self.ondes_effectives = None
+        self._envoyer(T.construire_set_liste_priorite(
+            self._prochain_invoke(), self.ondes_demandees))
+        self._envoyer(T.construire_get_liste_priorite(self._prochain_invoke()))
+
+    def _sur_liste_ondes(self, apdu):
+        try:
+            attributs, _ = D.decoder_liste_attributs(apdu.donnees, 6)
+            brut = attributs.get(C.NOM_ATTR_POLL_RTSA_PRIO_LIST)
+            if brut is None or len(brut) < 4:
+                return
+            import struct as _s
+            nombre, _ = _s.unpack_from('>HH', brut, 0)
+            effectives = [_s.unpack_from('>I', brut, 4 + 4 * i)[0] & 0xFFFF
+                          for i in range(nombre)]
+        except (D.ErreurDecodage, Exception) as e:
+            log.warning("liste de priorité illisible : %s", e)
+            return
+
+        self.ondes_effectives = effectives
+        manquantes = [p for p in self.ondes_demandees if p not in effectives]
+        if manquantes:
+            noms = ', '.join((CAT.CATALOGUE[p].nom if p in CAT.CATALOGUE
+                              else f'0x{p:04X}') for p in manquantes)
+            log.error("Le moniteur n'a pas retenu %d onde(s) demandée(s) : %s. "
+                      "Label inexistant, objet indisponible, ou limites 3 ECG / "
+                      "8 non-ECG dépassées (PIPG p. 287).", len(manquantes), noms)
+            self.base.enregistrer_lacune(
+                type='ondes_non_retenues', session_id=self.session_id,
+                intervention_id=self.intervention_id, detail=noms)
+        else:
+            log.info("Liste d'ondes confirmée par le moniteur : %d onde(s)",
+                     len(effectives))
+
+    def _demander_poll_etendu(self, force: bool = False):
+        maintenant = self.horloge()
+        if not force and maintenant - self._t_poll_etendu < PERIODE_ACTIVE_POLL_ETENDU_S / 2:
+            return
+        self._t_poll_etendu = maintenant
+        self._envoyer(T.construire_poll_request_etendu(
+            self._prochain_invoke(), C.NOM_MOC_VMO_METRIC_SA_RT,
+            C.NOM_ATTR_GRP_TOUS,          # 0 : contexte multiplexé (PIPG p. 287)
+            PERIODE_ACTIVE_POLL_ETENDU_S))
+
+    def _degrader_courbes(self, motif: str):
+        """
+        La perte des courbes ne doit jamais faire tomber les numerics : on
+        coupe, on journalise, on continue.
+        """
+        self._echecs_courbes += 1
+        log.warning("Courbes : %s (%d/%d)", motif, self._echecs_courbes,
+                    ECHECS_COURBES_AVANT_COUPURE)
+        if self._echecs_courbes < ECHECS_COURBES_AVANT_COUPURE:
+            return
+        log.error("Courbes coupées après %d dégradations (%s). Les numerics "
+                  "continuent.", self._echecs_courbes, motif)
+        self.base.enregistrer_lacune(
+            type='courbes_coupees', session_id=self.session_id,
+            intervention_id=self.intervention_id, detail=motif)
+        self._fermer_courbes()
+        self.courbes_actives = False
+        self.rapporteur.mettre_a_jour(
+            courbes_negociees=False,
+            alerte=f"courbes coupées : {motif} — numerics maintenus")
 
     # ── sessions ────────────────────────────────────────────────────────────
 
@@ -190,6 +336,7 @@ class Acquisition:
 
     def _fermer_session(self, motif: str):
         self.base.vider_lot()
+        self._fermer_courbes()
         if self.session_id is not None:
             self.base.fermer_session(self.session_id, motif)
         self.session_id = None
@@ -274,6 +421,8 @@ class Acquisition:
             return
         if apdu.command_type == C.CMD_CONFIRMED_ACTION:
             self._sur_resultat_poll(donnees, apdu)
+        elif apdu.command_type == C.CMD_GET:
+            self._sur_liste_ondes(apdu)
 
     def _sur_mds_create(self, donnees: bytes):
         try:
@@ -317,6 +466,15 @@ class Acquisition:
             self.rapporteur.etat.compteurs.erreurs_decodage += 1
             log.warning("poll result illisible : %s", e)
             return
+        if resultat.type_objet == C.NOM_MOC_VMO_METRIC_SA_RT:
+            if resultat.etendu:
+                self._sur_resultat_ondes(resultat)
+            else:
+                # réponse au poll de contexte statique : déclare les canaux
+                horodatage = _utc()
+                for objet in resultat.objets:
+                    self._traiter_objet_onde(objet, resultat.temps_relatif, horodatage)
+            return
         if resultat.type_objet != C.NOM_MOC_VMO_METRIC_NU:
             return
 
@@ -358,6 +516,117 @@ class Acquisition:
         if self.machine.etat is Etat.ASSOCIE:
             self.machine.transition(Etat.ACQUISITION, f"{ecrites} mesures écrites")
 
+    def _sur_resultat_ondes(self, resultat):
+        """
+        Un résultat périodique de courbes (256 ms, PIPG p. 60).
+
+        Le suivi du sequence_no est la seule façon de détecter un message perdu
+        (p. 62) : le premier porte 0, les suivants s'incrémentent. Un saut est
+        enregistré comme lacune ET comblé dans le fichier, pour que l'axe
+        temporel reste continu.
+        """
+        if self.ecrivain_courbes is None:
+            return
+        self.rapporteur.etat.compteurs.resultats_ondes += 1
+
+        sequence = resultat.sequence_no
+        if sequence is not None:
+            if sequence == 0:
+                # confirmation que la requête étendue a été acceptée (p. 60)
+                log.info("Poll étendu confirmé par le moniteur (sequence_no = 0)")
+                self._sequence_attendue = 1
+            elif self._sequence_attendue is not None:
+                perdus = (sequence - self._sequence_attendue) & 0xFFFF
+                if 0 < perdus < 1000:
+                    self.rapporteur.etat.compteurs.ondes_manquantes += perdus
+                    log.warning("%d résultat(s) de courbe perdu(s) "
+                                "(sequence_no %d attendu, %d reçu)",
+                                perdus, self._sequence_attendue, sequence)
+                    self.base.enregistrer_lacune(
+                        type='sequence_ondes_manquante', session_id=self.session_id,
+                        intervention_id=self.intervention_id,
+                        detail=f"{perdus} résultat(s), sequence_no "
+                               f"{self._sequence_attendue} -> {sequence}")
+                self._sequence_attendue = (sequence + 1) & 0xFFFF
+
+        horodatage = _utc()
+        for objet in resultat.objets:
+            self._traiter_objet_onde(objet, resultat.temps_relatif, horodatage)
+
+        if self.machine.etat is Etat.ASSOCIE and self.intervention_id is not None:
+            # des courbes arrivent : on acquiert, même si les numerics tardent
+            self.machine.transition(Etat.ACQUISITION, "courbes reçues")
+        self.rapporteur.signaler_vie_sans_donnees()
+
+    def _traiter_objet_onde(self, objet, temps_relatif: int, horodatage: str):
+        # Le moniteur continue d'émettre jusqu'à expiration de l'active_period :
+        # après une coupure des courbes, ces résultats tardifs sont ignorés.
+        if self.ecrivain_courbes is None:
+            return
+        attributs = objet.attributs
+
+        # contexte statique/dynamique, multiplexé un objet par 1024 ms (p. 287)
+        specification = attributs.get(C.NOM_ATTR_SA_SPECN)
+        periode = attributs.get(C.NOM_ATTR_TIME_PD_SAMP)
+        calibration = attributs.get(C.NOM_ATTR_SCALE_SPECN_I16)
+        masques = attributs.get(C.NOM_ATTR_SA_FIXED_VAL_SPECN)
+
+        ondes = []
+        if C.NOM_ATTR_SA_VAL_OBS in attributs:
+            onde, _ = D.decoder_sa_obs_value(attributs[C.NOM_ATTR_SA_VAL_OBS])
+            ondes.append(onde)
+        if C.NOM_ATTR_SA_CMPD_VAL_OBS in attributs:
+            # ECG composé : 3 voies à 250 sps partageant un contexte (p. 287)
+            ondes.extend(D.decoder_sa_obs_value_cmp(
+                attributs[C.NOM_ATTR_SA_CMPD_VAL_OBS]))
+        if not ondes:
+            return
+
+        spec = D.decoder_sa_spec(specification) if specification else None
+        periode_ticks = None
+        if periode and len(periode) >= 4:
+            import struct as _s
+            periode_ticks = _s.unpack_from('>I', periode, 0)[0]
+        table_masques = D.decoder_masques_qualite(masques) if masques else None
+
+        for onde in ondes:
+            canal = self.ecrivain_courbes.canaux.get(onde.physio_id)
+            if canal is None:
+                # p. 84 : la fréquence se LIT, elle ne se code jamais en dur.
+                if periode_ticks is None:
+                    log.debug("onde 0x%04X reçue avant sa période "
+                              "d'échantillonnage : bloc ignoré", onde.physio_id)
+                    continue
+                # array_size vient de SaSpec (p. 83), pas du bloc reçu : lors
+                # du poll de contexte statique le bloc est vide.
+                self.ecrivain_courbes.declarer_canal(
+                    onde.physio_id, periode_ticks=periode_ticks,
+                    taille_tableau=(spec.taille_tableau if spec and spec.taille_tableau
+                                    else onde.nombre),
+                    bits_significatifs=spec.bits_significatifs if spec else 16,
+                    flags=spec.flags if spec else 0)
+            elif spec or periode_ticks:
+                self.ecrivain_courbes.mettre_a_jour_specification(
+                    onde.physio_id, periode_ticks=periode_ticks,
+                    bits_significatifs=spec.bits_significatifs if spec else None,
+                    flags=spec.flags if spec else None)
+
+            if table_masques:
+                self._masques_par_canal[onde.physio_id] = table_masques
+            if calibration:
+                self.ecrivain_courbes.ecrire_calibration(
+                    onde.physio_id, D.decoder_calibration(calibration),
+                    reltime=temps_relatif, ts_utc=horodatage)
+
+            if not onde.echantillons:
+                continue          # poll de contexte : rien à écrire
+            combles = self.ecrivain_courbes.ecrire_bloc(
+                onde.physio_id, reltime=temps_relatif,
+                echantillons=onde.echantillons, etat=onde.etat,
+                masques=self._masques_par_canal.get(onde.physio_id))
+            if combles:
+                self.rapporteur.etat.compteurs.ondes_manquantes += combles
+
     # ── échéances ───────────────────────────────────────────────────────────
 
     def _echeances(self):
@@ -377,6 +646,9 @@ class Acquisition:
         if self.machine.etat in (Etat.ASSOCIE, Etat.ACQUISITION):
             self._surveiller_donnees(maintenant)
             self._interroger(maintenant)
+            if self.ecrivain_courbes is not None:
+                # p. 61 : renvoyer la requête AVANT expiration de l'active_period
+                self._demander_poll_etendu()
             self._keepalive(maintenant)
 
     def _tenter_association(self):
@@ -451,6 +723,7 @@ class Acquisition:
 
     def _perdre(self, motif: str):
         self.rapporteur.etat.compteurs.lacunes += 1
+        self._sequence_attendue = None
         if self.session_id is not None:
             self.base.enregistrer_lacune(
                 type='association_perdue', session_id=self.session_id,

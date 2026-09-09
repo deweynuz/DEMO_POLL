@@ -202,6 +202,12 @@ class Simulateur:
         self.poll_etendu = None       # dict(invoke_id, poll_number, fin, prochaine, sequence)
         self.sequence_no = 0
         self.resultats_ondes = 0
+        # rel_time_stamp des blocs de courbes. Un vrai moniteur l'aligne sur son
+        # horloge d'ÉCHANTILLONNAGE, pas sur l'horloge murale : deux blocs
+        # consécutifs diffèrent d'exactement taille_tableau x periode, soit
+        # 2048 ticks (256 ms) pour tous les types du tableau p. 286. L'aligner
+        # ici évite de fabriquer de faux micro-trous à chaque bloc.
+        self._reltime_bloc: int | None = None
 
     def _temps_relatif(self) -> int:
         """RelativeTime du moniteur, en ticks de 1/8 ms (p. 62)."""
@@ -393,6 +399,10 @@ class Simulateur:
             objets = []
         elif classe == C.NOM_MOC_VMO_METRIC_NU:
             objets = self._objets_numerics()
+        elif classe == C.NOM_MOC_VMO_METRIC_SA_RT and groupe == C.NOM_ATTR_GRP_VMO_STATIC:
+            # contexte statique des ondes : le client peut le demander
+            # explicitement au lieu d'attendre le multiplexage (p. 287)
+            objets = self._contexte_statique_ondes()
         else:
             objets = []
         for m in T.construire_serie_poll_result(
@@ -418,6 +428,7 @@ class Simulateur:
         periode = (C.PERIODE_RESULTAT_COURBES_S if classe == C.NOM_MOC_VMO_METRIC_SA_RT
                    else C.PERIODE_RESULTAT_NUMERICS_S)
         self.sequence_no = 0
+        self._reltime_bloc = self._temps_relatif()
         self.poll_etendu = dict(invoke_id=invoke_id, classe=classe, groupe=groupe,
                                 periode=periode, fin=time.monotonic() + duree,
                                 prochaine=time.monotonic())
@@ -430,8 +441,15 @@ class Simulateur:
         sequence = self.sequence_no
         self.sequence_no = (self.sequence_no + 1) & 0xFFFF
 
+        temps_relatif = self._temps_relatif()
         if pe['classe'] == C.NOM_MOC_VMO_METRIC_SA_RT:
             self.resultats_ondes += 1
+            if self._reltime_bloc is None:
+                self._reltime_bloc = temps_relatif
+            temps_relatif = self._reltime_bloc
+            # 256 ms exactement, que le résultat parte ou soit perdu : un
+            # résultat manquant laisse donc un trou d'exactement un bloc.
+            self._reltime_bloc += C.secondes_vers_ticks(C.PERIODE_RESULTAT_COURBES_S)
             if (self.pannes.perdre_un_resultat_sur
                     and self.resultats_ondes % self.pannes.perdre_un_resultat_sur == 0):
                 self.stats['resultats_perdus'] += 1
@@ -442,11 +460,30 @@ class Simulateur:
 
         for m in T.construire_serie_poll_result(
                 pe['invoke_id'], poll_number=pe['invoke_id'],
-                temps_relatif=self._temps_relatif(), classe_objet=pe['classe'],
+                temps_relatif=temps_relatif, classe_objet=pe['classe'],
                 groupe_attributs=pe['groupe'], objets=objets,
                 etendu=True, sequence_no=sequence):
             self._envoyer(m)
             self.stats['resultats_envoyes'] += 1
+
+    def _contexte_statique_ondes(self):
+        objets = []
+        for k, onde in enumerate(self.ondes):
+            if onde.physio_id not in self.liste_priorite:
+                continue
+            objets.append((0x0300 + k, [
+                (C.NOM_ATTR_SA_VAL_OBS,
+                 T.encoder_sa_obs_value(onde.physio_id, b'', 0)),
+                (C.NOM_ATTR_SA_SPECN, T.encoder_sa_spec(
+                    onde.taille_tableau, 16, onde.bits_significatifs, onde.flags)),
+                (C.NOM_ATTR_TIME_PD_SAMP, struct.pack(
+                    '>I', C.secondes_vers_ticks(onde.periode_echantillonnage_ms / 1000))),
+                (C.NOM_ATTR_SCALE_SPECN_I16, self._calibration(onde)),
+                (C.NOM_ATTR_SA_FIXED_VAL_SPECN, T.encoder_masques_qualite({
+                    C.SA_FIX_INVALID_MASK: 0x8000, C.SA_FIX_PACER_MASK: 0x8000,
+                    C.SA_FIX_SATURATION: 0x4000})),
+            ]))
+        return objets
 
     def _objets_ondes(self):
         t = time.monotonic() - self.t_demarrage
