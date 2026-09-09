@@ -50,6 +50,10 @@ class Acquisition:
     courbes: bool = False
     ondes: list[str] = field(default_factory=list)
     mtu: int = 1364
+    #: ouvrir/fermer une intervention sur admission et sortie du patient
+    intervention_auto: bool = True
+    #: refuser d'enregistrer quand le moniteur est en mode démonstration
+    refuser_mode_demo: bool = True
 
 
 @dataclass
@@ -108,7 +112,7 @@ _SECTIONS = {
     'site':         {'nom', 'salle'},
     'moniteur':     {'mac', 'bed_label', 'ip', 'verifier_bed_label'},
     'acquisition':  {'periode_numerics_s', 'periode_demographiques_s', 'courbes',
-                     'ondes', 'mtu'},
+                     'ondes', 'mtu', 'intervention_auto', 'refuser_mode_demo'},
     'surveillance': {'silence_donnees_s', 'echecs_avant_alerte', 'seuil_disque_mo',
                      'backoff_min_s', 'backoff_max_s'},
     'stockage':     {'chemin', 'uuid', 'marqueur'},
@@ -220,7 +224,9 @@ def valider(brut: dict) -> Configuration:
             periode_numerics_s=float(periode),
             periode_demographiques_s=float(acq.get('periode_demographiques_s', 30.0)),
             courbes=bool(acq.get('courbes', False)),
-            ondes=list(liste), mtu=mtu),
+            ondes=list(liste), mtu=mtu,
+            intervention_auto=bool(acq.get('intervention_auto', True)),
+            refuser_mode_demo=bool(acq.get('refuser_mode_demo', True))),
         surveillance=Surveillance(
             silence_donnees_s=float(silence),
             echecs_avant_alerte=int(sur.get('echecs_avant_alerte', 3)),

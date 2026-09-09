@@ -190,9 +190,9 @@ def test_acquisition_nominale(acquisition):
     assert pomper(acq, 8.0, lambda: acq.machine.etat is Etat.ACQUISITION)
 
     lignes = base.conn.execute(
-        "SELECT physio_id, nom, valeur, valide FROM mesures").fetchall()
+        "SELECT physio_id, parametre, valeur, valide FROM mesures").fetchall()
     assert lignes
-    noms = {l['nom'] for l in lignes if l['nom']}
+    noms = {l['parametre'] for l in lignes if l['parametre']}
     assert 'NOM_ECG_CARD_BEAT_RATE' in noms or lignes, noms
     assert all(l['valeur'] is not None for l in lignes if l['valide'])
 

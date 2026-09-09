@@ -33,7 +33,7 @@ from .etat import RapporteurEtat
 from .machine import Etat, MachineEtats
 from .protocole import constantes as C, decodage as D, trames as T
 from .protocole import ondes as CAT
-from .stockage.base import Base
+from .stockage.base import Base, BaseIdentites
 from .stockage.courbes import EcrivainCourbes
 
 log = logging.getLogger('mx800.acquisition')
@@ -109,6 +109,13 @@ class Acquisition:
         self._echecs_courbes = 0
         self._masques_par_canal: dict[int, dict[int, int]] = {}
 
+        # démographiques
+        self.identites = BaseIdentites(config.base_identites)
+        self.demographiques: D.Demographiques | None = None
+        self.empreinte_patient: str | None = None
+        self.mode_operation: int | None = None
+        self._t_dernier_demog = 0.0
+
     # ── utilitaires ─────────────────────────────────────────────────────────
 
     def _prochain_invoke(self) -> int:
@@ -147,6 +154,7 @@ class Acquisition:
                 self._envoyer(T.RELEASE_REQUEST)
             self.sock.close()
             self.sock = None
+        self.identites.fermer()
 
     # ── interventions ───────────────────────────────────────────────────────
 
@@ -313,6 +321,11 @@ class Acquisition:
             except ValueError:
                 pass
         source, synchro = _source_horloge()
+        self.mode_operation = mds.mode_operation
+        if mds.en_demonstration:
+            log.error("Le moniteur %s est en MODE DÉMONSTRATION (mode_op=0x%04X). "
+                      "Les signaux qu'il produit sont fabriqués : ce ne sont PAS "
+                      "des données patient.", self.adresse, mds.mode_operation)
         self.session_id = self.base.ouvrir_session(
             site=self.config.site.nom, salle=self.config.site.salle,
             moniteur_ip=self.adresse, moniteur_mac=self.config.moniteur.mac,
@@ -321,7 +334,9 @@ class Acquisition:
             horloge_source=source, horloge_synchronisee=int(synchro),
             moniteur_datetime_utc=depuis_moniteur,
             moniteur_reltime=mds.temps_relatif,
-            ecart_horloge_s=ecart)
+            ecart_horloge_s=ecart,
+            mode_operation=mds.mode_operation,
+            mode_demonstration=int(mds.en_demonstration))
         self.bed_label = mds.bed_label or ''
         self.rapporteur.mettre_a_jour(
             moniteur_ip=self.adresse, moniteur_bed_label=self.bed_label,
@@ -466,6 +481,9 @@ class Acquisition:
             self.rapporteur.etat.compteurs.erreurs_decodage += 1
             log.warning("poll result illisible : %s", e)
             return
+        if resultat.type_objet == C.NOM_MOC_PT_DEMOG:
+            self._sur_demographiques(resultat)
+            return
         if resultat.type_objet == C.NOM_MOC_VMO_METRIC_SA_RT:
             if resultat.etendu:
                 self._sur_resultat_ondes(resultat)
@@ -504,7 +522,7 @@ class Acquisition:
             self.base.empiler_mesure(
                 session_id=self.session_id, intervention_id=self.intervention_id,
                 ts_utc=horodatage, physio_id=v.physio_id,
-                nom=catalogue.nom if catalogue else None,
+                parametre=catalogue.nom if catalogue else None,
                 valeur=v.valeur, unite=v.unit_code, etat=v.etat, valide=v.valide)
         ecrites = self.base.vider_lot()
         if not ecrites:
@@ -646,6 +664,7 @@ class Acquisition:
         if self.machine.etat in (Etat.ASSOCIE, Etat.ACQUISITION):
             self._surveiller_donnees(maintenant)
             self._interroger(maintenant)
+            self._interroger_demographiques(maintenant)
             if self.ecrivain_courbes is not None:
                 # p. 61 : renvoyer la requête AVANT expiration de l'active_period
                 self._demander_poll_etendu()
@@ -673,6 +692,95 @@ class Acquisition:
         self._envoyer(T.construire_poll_request(
             self._prochain_invoke(), C.NOM_MOC_VMO_METRIC_NU,
             C.NOM_ATTR_GRP_METRIC_VAL_OBS))
+
+    def _interroger_demographiques(self, maintenant: float):
+        periode = self.config.acquisition.periode_demographiques_s
+        if maintenant - self._t_dernier_demog < periode:
+            return
+        self._t_dernier_demog = maintenant
+        self._envoyer(T.construire_poll_request(
+            self._prochain_invoke(), C.NOM_MOC_PT_DEMOG, C.NOM_ATTR_GRP_PT_DEMOG))
+
+    # ── démographiques et interventions automatiques ────────────────────────
+
+    def _sur_demographiques(self, resultat):
+        attributs: dict[int, bytes] = {}
+        for objet in resultat.objets:
+            attributs.update(objet.attributs)
+        if not attributs:
+            return
+        demo = D.decoder_demographiques(attributs)
+        precedent = self.demographiques
+        self.demographiques = demo
+
+        if precedent is None or precedent.etat != demo.etat:
+            log.info("Patient : état %s%s", demo.etat_nom,
+                     f" ({demo.type_nom})" if demo.type_nom else "")
+        if not self.config.acquisition.intervention_auto:
+            return
+
+        if demo.admis and demo.identifiant:
+            if self.empreinte_patient != demo.identifiant:
+                self._changer_de_patient(demo)
+        elif self.intervention_id is not None and self.empreinte_patient is not None:
+            # EMPTY ou DISCHARGED : le patient a quitté l'appareil (p. 103)
+            log.info("Patient %s — fin d'intervention automatique",
+                     demo.etat_nom)
+            self.arreter_intervention()
+            self.empreinte_patient = None
+
+    def _changer_de_patient(self, demo: 'D.Demographiques'):
+        """
+        Un nouvel identifiant patient : on clôt l'intervention en cours et on
+        en ouvre une autre. Sans cette bascule, deux patients successifs
+        seraient fondus dans un même enregistrement.
+        """
+        if self.intervention_id is not None:
+            log.info("Nouveau patient sur le moniteur : clôture de %s",
+                     self.code_intervention)
+            self.arreter_intervention()
+
+        if self.config.acquisition.refuser_mode_demo and C.en_demonstration(
+                self.mode_operation):
+            log.error("Ouverture d'intervention REFUSÉE : le moniteur est en mode "
+                      "démonstration. Mettre refuser_mode_demo = false pour "
+                      "enregistrer malgré tout (les données seront marquées).")
+            self.rapporteur.mettre_a_jour(
+                alerte="moniteur en mode démonstration — aucun enregistrement")
+            self.empreinte_patient = demo.identifiant
+            return
+
+        self.empreinte_patient = demo.identifiant
+        code = self._prochain_code_recherche()
+        self.intervention_id = self.base.ouvrir_intervention(
+            code, site=self.config.site.nom, salle=self.config.site.salle,
+            courbes=self.config.acquisition.courbes, ouverture='auto',
+            empreinte_patient=demo.identifiant,
+            demonstration=C.en_demonstration(self.mode_operation))
+        self.code_intervention = code
+        self.rapporteur.mettre_a_jour(intervention=code, alerte=None)
+        # L'identité nominative va dans sa base séparée, jamais dans mx800.db.
+        self.identites.enregistrer(code, {
+            'patient_id': demo.patient_id, 'nom': demo.nom, 'prenom': demo.prenom,
+            'sexe': demo.sexe_nom, 'type_patient': demo.type_nom,
+            'admis_utc': _utc()})
+        log.info("Intervention %s ouverte automatiquement (patient admis)", code)
+        if self.config.acquisition.courbes:
+            self._ouvrir_courbes()
+
+    def _prochain_code_recherche(self) -> str:
+        annee = datetime.now(timezone.utc).year
+        prefixe = f"{self.config.site.nom}-{self.config.site.salle}-{annee}-"
+        dernier = self.base.conn.execute(
+            "SELECT code_recherche FROM interventions WHERE code_recherche LIKE ? "
+            "ORDER BY code_recherche DESC LIMIT 1", (prefixe + '%',)).fetchone()
+        numero = 1
+        if dernier:
+            try:
+                numero = int(dernier['code_recherche'].rsplit('-', 1)[1]) + 1
+            except (IndexError, ValueError):
+                pass
+        return f"{prefixe}{numero:04d}"
 
     def _keepalive(self, maintenant: float):
         """

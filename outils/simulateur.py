@@ -166,10 +166,15 @@ class Simulateur:
     def __init__(self, *, adresse: str = '0.0.0.0', port: int = C.PORT_MONITEUR,
                  bed_label: str = 'SIM1', system_id: bytes = b'\x00\x00\x00\x00\x00\x01',
                  courbes_supportees: bool = True, pannes: Pannes | None = None,
-                 ondes: list[OndeSimulee] | None = None, graine: int = 1):
+                 ondes: list[OndeSimulee] | None = None, graine: int = 1,
+                 mode_operation: int = C.OPMODE_MONITOR):
         self.adresse, self.port = adresse, port
         self.bed_label, self.system_id = bed_label, system_id
         self.courbes_supportees = courbes_supportees
+        self.mode_operation = mode_operation
+        # Démographiques : état EMPTY tant que personne n'est admis (p. 103)
+        self.patient = dict(etat=C.PT_EMPTY, patient_id='', nom='', prenom='',
+                            sexe=C.SEXES_PATIENT and 0, type_patient=1)
         self.pannes = pannes or Pannes()
         self.ondes = ondes if ondes is not None else list(ONDES_DEFAUT)
         self.alea = random.Random(graine)
@@ -326,7 +331,9 @@ class Simulateur:
         self._envoyer(T.construire_mds_create_event(
             self.mds_invoke_id, temps_relatif=self._temps_relatif(),
             bed_label=self.bed_label, system_id=self.system_id,
-            date_heure=self._horodatage()))
+            date_heure=self._horodatage(),
+            attributs_sup=[(C.NOM_ATTR_MODE_OP,
+                            struct.pack('>H', self.mode_operation))]))
 
     def _sur_release(self, pair):
         self.stats['release_recu'] += 1
@@ -399,6 +406,8 @@ class Simulateur:
             objets = []
         elif classe == C.NOM_MOC_VMO_METRIC_NU:
             objets = self._objets_numerics()
+        elif classe == C.NOM_MOC_PT_DEMOG:
+            objets = self._objets_demographiques()
         elif classe == C.NOM_MOC_VMO_METRIC_SA_RT and groupe == C.NOM_ATTR_GRP_VMO_STATIC:
             # contexte statique des ondes : le client peut le demander
             # explicitement au lieu d'attendre le multiplexage (p. 287)
@@ -465,6 +474,32 @@ class Simulateur:
                 etendu=True, sequence_no=sequence):
             self._envoyer(m)
             self.stats['resultats_envoyes'] += 1
+
+    # ── démographiques (p. 103-105) ─────────────────────────────────────────
+
+    def admettre(self, patient_id: str, *, nom: str = 'Test', prenom: str = 'Patient',
+                 sexe: int = 1, type_patient: int = 1):
+        self.patient = dict(etat=C.PT_ADMITTED, patient_id=patient_id, nom=nom,
+                            prenom=prenom, sexe=sexe, type_patient=type_patient)
+        log.info("Patient admis : %s", patient_id)
+
+    def sortir(self):
+        """p. 103 : DISCHARGED — les données restent, le patient n'est plus assigné."""
+        self.patient = dict(self.patient, etat=C.PT_DISCHARGED)
+        log.info("Patient sorti")
+
+    def _objets_demographiques(self):
+        p = self.patient
+        attributs = [(C.NOM_ATTR_PT_DEMOG_ST, struct.pack('>H', p['etat']))]
+        if p['etat'] in (C.PT_ADMITTED, C.PT_DISCHARGED):
+            attributs += [
+                (C.NOM_ATTR_PT_ID, T.encoder_chaine(p['patient_id'], 20)),
+                (C.NOM_ATTR_PT_NAME_FAMILY, T.encoder_chaine(p['nom'], 38)),
+                (C.NOM_ATTR_PT_NAME_GIVEN, T.encoder_chaine(p['prenom'], 38)),
+                (C.NOM_ATTR_PT_SEX, struct.pack('>H', p['sexe'])),
+                (C.NOM_ATTR_PT_TYPE, struct.pack('>H', p['type_patient'])),
+            ]
+        return [(0x0001, attributs)]
 
     def _contexte_statique_ondes(self):
         objets = []
