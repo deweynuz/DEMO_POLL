@@ -190,3 +190,14 @@ def test_set_liste_priorite_contient_les_text_ids():
     assert struct.pack('>I', 0x00024BB4) in trame
     assert struct.pack('>I', 0x00024A14) in trame
     assert struct.pack('>H', C.NOM_ATTR_POLL_RTSA_PRIO_LIST) in trame
+
+
+def test_poll_request_identique_a_la_trame_reelle():
+    """
+    ActionArgument porte un champ `scope` (u_32, valeur fixe 0) qu'ActionResult
+    n'a pas (p. 49). L'omettre décale tout de 4 octets, et le moniteur ignore la
+    requête sans rien signaler.
+    """
+    produit = T.construire_poll_request(1, C.NOM_MOC_VMO_METRIC_NU,
+                                        C.NOM_ATTR_GRP_METRIC_VAL_OBS)
+    assert produit == lire('poll_request_nu.bin')

@@ -226,7 +226,17 @@ def _rolrs(etat: int, compteur: int, invoke_id: int, command_type: int, corps: b
 
 
 def _action(invoke_id: int, action_type: int, charge: bytes) -> bytes:
+    """
+    ActionArgument — p. 49 :
+        ManagedObjectId managed_object;   6 octets
+        u_32            scope;            valeur fixe 0  <-- ABSENT d'ActionResult
+        OIDType         action_type;
+        u_16            length;
+    L'oubli du champ `scope` décale tout de 4 octets et le moniteur ignore la
+    requête sans rien signaler.
+    """
     corps = (struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)      # managed_object
+             + struct.pack('>I', 0)                            # scope, fixé à 0
              + struct.pack('>HH', action_type, len(charge)) + charge)
     return _roiv(invoke_id, C.CMD_CONFIRMED_ACTION, corps)
 
@@ -276,14 +286,18 @@ def construire_mds_create_result(invoke_id: int, managed_object: bytes,
 
 
 def construire_get_liste_priorite(invoke_id: int) -> bytes:
-    """GET PRIORITY LIST REQUEST — p. 63. AttributeIdList = liste des ondes."""
+    """
+    GET PRIORITY LIST REQUEST — p. 63.
+    GetArgument (p. 50) : managed_object(6) + scope u_32 (fixe 0) + AttributeIdList.
+    """
     corps = (struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)
+             + struct.pack('>I', 0)                         # scope
              + struct.pack('>HH', 1, 2)                     # AttributeIdList
              + struct.pack('>H', C.NOM_ATTR_POLL_RTSA_PRIO_LIST))
     return _roiv(invoke_id, C.CMD_GET, corps)
 
 
-# ModificationList : opérations de SET (p. 64)
+# ModifyOperator — p. 51
 REPLACE         = 0
 ADD_VALUES      = 1   # non supportée par le moniteur (p. 64)
 REMOVE_VALUES   = 2   # non supportée par le moniteur (p. 64)
@@ -303,10 +317,13 @@ def construire_set_liste_priorite(invoke_id: int, physio_ids: list[int]) -> byte
                          f"{C.MAX_ONDES_ECG} ECG + {C.MAX_ONDES_NON_ECG} non-ECG (p. 286-287)")
     text_ids = b''.join(struct.pack('>I', C.text_id(p)) for p in physio_ids)
     liste = struct.pack('>HH', len(physio_ids), len(text_ids)) + text_ids
+    # AttributeModEntry (p. 51) : ModifyOperator + AVAType
     modification = (struct.pack('>H', REPLACE)
                     + struct.pack('>HH', C.NOM_ATTR_POLL_RTSA_PRIO_LIST, len(liste))
                     + liste)
+    # SetArgument (p. 51) : managed_object + scope u_32 + ModificationList
     corps = (struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)
+             + struct.pack('>I', 0)
              + struct.pack('>HH', 1, len(modification)) + modification)
     return _roiv(invoke_id, C.CMD_CONFIRMED_SET, corps)
 
@@ -316,5 +333,203 @@ def construire_set_liste_priorite_defaut(invoke_id: int) -> bytes:
     modification = (struct.pack('>H', SET_TO_DEFAULT)
                     + struct.pack('>HH', C.NOM_ATTR_POLL_RTSA_PRIO_LIST, 0))
     corps = (struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)
+             + struct.pack('>I', 0)
              + struct.pack('>HH', 1, len(modification)) + modification)
     return _roiv(invoke_id, C.CMD_CONFIRMED_SET, corps)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CÔTÉ MONITEUR — utilisé par le simulateur (outils/simulateur.py)
+#
+# Ces fonctions produisent ce qu'un MX800 émet. Le client n'en a pas besoin,
+# mais les écrire ici garantit qu'encodage et décodage restent face à face,
+# et que les tests peuvent comparer aux trames réelles.
+# ═════════════════════════════════════════════════════════════════════════════
+
+PARTITION_OBJETS = 0x0001    # partition « Object Oriented Elements », p. 56
+
+
+def _type_objet(code: int) -> bytes:
+    """TYPE = { partition(2), code(2) } — p. 56."""
+    return struct.pack('>HH', PARTITION_OBJETS, code)
+
+
+# ─── Valeurs observées ──────────────────────────────────────────────────────
+
+def encoder_nu_obs_value(physio_id: int, valeur: float | None, unit_code: int,
+                         etat: int = 0, decimales: int = 2) -> bytes:
+    """NuObsValue — p. 76. { physio_id, state, unit_code, value } = 10 octets."""
+    return struct.pack('>HHHI', physio_id, etat, unit_code,
+                       encoder_float(valeur, decimales))
+
+
+def encoder_nu_obs_value_cmp(valeurs: list[tuple[int, float | None, int, int]]) -> bytes:
+    """NuObsValueCmp — p. 77. Liste de (physio_id, valeur, unit_code, etat)."""
+    corps = b''.join(encoder_nu_obs_value(p, v, u, e) for p, v, u, e in valeurs)
+    return struct.pack('>HH', len(valeurs), len(corps)) + corps
+
+
+def encoder_sa_obs_value(physio_id: int, echantillons: bytes, etat: int = 0) -> bytes:
+    """
+    SaObsValue — p. 87. { physio_id, state, { length, value[] } }.
+    `length` est en OCTETS : 128 échantillons 16 bits -> 256.
+    """
+    return struct.pack('>HHH', physio_id, etat, len(echantillons)) + echantillons
+
+
+def encoder_sa_obs_value_cmp(ondes: list[tuple[int, bytes, int]]) -> bytes:
+    """
+    SaObsValueCmp — p. 88. Utilisé pour l'ECG composé : 3 voies à 250 sps
+    partageant un contexte commun (p. 287).
+    """
+    corps = b''.join(encoder_sa_obs_value(p, e, s) for p, e, s in ondes)
+    return struct.pack('>HH', len(ondes), len(corps)) + corps
+
+
+def encoder_scale_range_spec16(bas_abs: float | None, haut_abs: float | None,
+                               bas_brut: int, haut_brut: int) -> bytes:
+    """ScaleRangeSpec16 — p. 86. 12 octets. NaN si l'onde n'a pas d'unité physique."""
+    return struct.pack('>IIHH', encoder_float(bas_abs), encoder_float(haut_abs),
+                       bas_brut & 0xFFFF, haut_brut & 0xFFFF)
+
+
+def encoder_sa_spec(taille_tableau: int, bits_par_echantillon: int,
+                    bits_significatifs: int, flags: int) -> bytes:
+    """SaSpec — p. 83."""
+    return struct.pack('>HBBH', taille_tableau, bits_par_echantillon,
+                       bits_significatifs, flags)
+
+
+def encoder_masques_qualite(masques: dict[int, int]) -> bytes:
+    """SaFixedValSpec16 — p. 83. { count, length, { id, valeur }[] }."""
+    corps = b''.join(struct.pack('>HH', i, v) for i, v in sorted(masques.items()))
+    return struct.pack('>HH', len(masques), len(corps)) + corps
+
+
+# ─── MDS Create Event ───────────────────────────────────────────────────────
+
+def construire_mds_create_event(invoke_id: int, *, temps_relatif: int,
+                                bed_label: str, system_id: bytes,
+                                date_heure: bytes,
+                                attributs_sup: list[tuple[int, bytes]] | None = None) -> bytes:
+    """
+    MDS Create Event (NOM_NOTI_MDS_CREAT, p. 111).
+
+    EventReportArgument : managed_object(6) + event_time(4) + event_type(2)
+                          + length(2) + MDSCreateInfo
+    MDSCreateInfo       : managed_object(6) + AttributeList
+    Structure recoupée octet à octet sur une trame réelle de MX800.
+    """
+    attributs = [
+        (C.NOM_ATTR_SYS_ID, struct.pack('>H', len(system_id)) + system_id),
+        (C.NOM_ATTR_ID_MODEL, encoder_chaine('Philips', 8, utf16=False)
+                              + encoder_chaine('M8000', 6, utf16=False)),
+        (C.NOM_ATTR_ID_BED_LABEL, encoder_chaine(bed_label, 34)),
+        (C.NOM_ATTR_TIME_ABS, date_heure),
+        (C.NOM_ATTR_TIME_REL, struct.pack('>I', temps_relatif)),
+    ] + list(attributs_sup or [])
+
+    managed_object = struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)
+    info = managed_object + encoder_liste_attributs(attributs)
+    corps = (managed_object + struct.pack('>I', temps_relatif)
+             + struct.pack('>HH', C.NOM_NOTI_MDS_CREAT, len(info)) + info)
+    return _roiv(invoke_id, C.CMD_CONFIRMED_EVENT_REPORT, corps)
+
+
+# ─── Poll results ───────────────────────────────────────────────────────────
+
+def _corps_poll_result(*, poll_number: int, sequence_no: int | None,
+                       temps_relatif: int, classe_objet: int,
+                       groupe_attributs: int,
+                       objets: list[tuple[int, list[tuple[int, bytes]]]]) -> bytes:
+    """
+    PollMdibDataReply (p. 56) ou PollMdibDataReplyExt (p. 62) selon sequence_no.
+      PollInfoList      : { count, length, SingleContextPoll[] }
+      SingleContextPoll : { context_id(2), { count, length, ObservationPoll[] } }
+      ObservationPoll   : { obj_handle(2), AttributeList }
+    """
+    observations = b''.join(struct.pack('>H', handle) + encoder_liste_attributs(attrs)
+                            for handle, attrs in objets)
+    contexte = (struct.pack('>H', 0)                              # context_id
+                + struct.pack('>HH', len(objets), len(observations)) + observations)
+    poll_info = struct.pack('>HH', 1 if objets else 0,
+                            len(contexte) if objets else 0) + (contexte if objets else b'')
+
+    entete = struct.pack('>H', poll_number)
+    if sequence_no is not None:
+        entete += struct.pack('>H', sequence_no)
+    entete += (struct.pack('>I', temps_relatif)
+               + ABS_TIME_NON_SUPPORTE                            # p. 62
+               + _type_objet(classe_objet)
+               + struct.pack('>H', groupe_attributs))
+    return entete + poll_info
+
+
+def construire_poll_result(invoke_id: int, *, poll_number: int, temps_relatif: int,
+                           classe_objet: int, groupe_attributs: int,
+                           objets: list[tuple[int, list[tuple[int, bytes]]]],
+                           etendu: bool = False, sequence_no: int | None = None,
+                           lien: tuple[int, int] | None = None) -> bytes:
+    """
+    Un message de résultat. `lien = (state, count)` produit un ROLRSapdu
+    (résultat lié, p. 44) ; sans lien, un RORSapdu qui termine la série (p. 58).
+    """
+    action = C.NOM_ACT_POLL_MDIB_DATA_EXT if etendu else C.NOM_ACT_POLL_MDIB_DATA
+    charge = _corps_poll_result(poll_number=poll_number, sequence_no=sequence_no,
+                                temps_relatif=temps_relatif, classe_objet=classe_objet,
+                                groupe_attributs=groupe_attributs, objets=objets)
+    corps = (struct.pack('>HHH', C.NOM_MOC_VMS_MDS, 0, 0)
+             + struct.pack('>HH', action, len(charge)) + charge)
+    if lien is None:
+        return _rors(invoke_id, C.CMD_CONFIRMED_ACTION, corps)
+    return _rolrs(lien[0], lien[1], invoke_id, C.CMD_CONFIRMED_ACTION, corps)
+
+
+def construire_serie_poll_result(invoke_id: int, *, poll_number: int,
+                                 temps_relatif: int, classe_objet: int,
+                                 groupe_attributs: int,
+                                 objets: list[tuple[int, list[tuple[int, bytes]]]],
+                                 mtu: int = 1000, etendu: bool = False,
+                                 sequence_no: int | None = None) -> list[bytes]:
+    """
+    Découpe les objets en autant de messages que nécessaire pour tenir dans le
+    MTU, puis termine par un RORSapdu à PollInfoList vide — exactement ce que
+    fait le moniteur réel (p. 58, et chaîne capturée sur SALLE1 :
+    ROLRS FIRST/1 -> ROLRS LAST/2 -> RORS vide).
+    """
+    lots: list[list] = [[]]
+    taille = 0
+    for handle, attrs in objets:
+        poids = 2 + 4 + sum(4 + len(v) for _, v in attrs)
+        if taille + poids > mtu - 60 and lots[-1]:
+            lots.append([]); taille = 0
+        lots[-1].append((handle, attrs)); taille += poids
+
+    messages = []
+    for i, lot in enumerate(lots):
+        if not lot:
+            continue
+        etat = (C.RORLS_FIRST if i == 0 else
+                C.RORLS_LAST if i == len(lots) - 1 else C.RORLS_NOT_FIRST_NOT_LAST)
+        messages.append(construire_poll_result(
+            invoke_id, poll_number=poll_number, temps_relatif=temps_relatif,
+            classe_objet=classe_objet, groupe_attributs=groupe_attributs,
+            objets=lot, etendu=etendu, sequence_no=sequence_no,
+            lien=(etat, i + 1)))
+    # terminateur : RORS à liste vide
+    messages.append(construire_poll_result(
+        invoke_id, poll_number=poll_number, temps_relatif=temps_relatif,
+        classe_objet=classe_objet, groupe_attributs=groupe_attributs,
+        objets=[], etendu=etendu, sequence_no=sequence_no))
+    return messages
+
+
+def construire_refuse() -> bytes:
+    """Refuse — p. 73. Pas de données variables (p. 72)."""
+    return bytes([C.RF_SPDU_SI, 0x02, 0x00, 0x00])
+
+
+def construire_abort() -> bytes:
+    """Abort — p. 72. Octets réels observés sur MX800."""
+    return bytes.fromhex('192e110103c129a080a0803080020101060251010000000061'
+                         '803080020101a08064808001010000000000000000')
