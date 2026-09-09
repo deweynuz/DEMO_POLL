@@ -1,400 +1,335 @@
-#!/bin/bash
-# ═══════════════════════════════════════════════════════════════════════════════
-# install.sh — Installation automatique système d'acquisition MX800 HEGP
-# Usage : curl -sSL https://raw.githubusercontent.com/deweynuz/DEMO_POLL/main/install.sh | bash
-# ═══════════════════════════════════════════════════════════════════════════════
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# Installation du service d'acquisition MX800.
+#
+# Idempotent : relançable sans dommage. Toute anomalie interrompt le script
+# plutôt que de produire une installation à moitié faite — le script précédent
+# copiait discover_monitor.py « si présent », si bien qu'un dépôt incomplet
+# donnait une installation qui échouait au premier démarrage.
+#
+# CE SCRIPT NE RECONFIGURE PAS LE RÉSEAU. Sur ce Pi, eth0 et dnsmasq servent
+# le BOOTP aux moniteurs cliniques : les toucher peut affecter du matériel en
+# service. Ils sont VÉRIFIÉS, pas modifiés. Utiliser --configurer-reseau
+# uniquement sur une machine neuve.
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
 
-set -e
+RACINE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR=/etc/mx800
+CONFIG="$CONFIG_DIR/config.toml"
+UNITE=/etc/systemd/system/mx800.service
+DONNEES_DEFAUT=/var/lib/mx800
+UTILISATEUR="${SUDO_USER:-$USER}"
 
-# ── Couleurs ─────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m'
+STOCKAGE=""; SITE=""; SALLE=""; MAC=""; IP=""
+INTERACTIF=1; DEMARRER=1; CONFIGURER_RESEAU=0
 
-ok()   { echo -e "${GREEN}✓${NC} $1"; }
-info() { echo -e "${BLUE}→${NC} $1"; }
-warn() { echo -e "${YELLOW}⚠${NC} $1"; }
-err()  { echo -e "${RED}✗${NC} $1"; exit 1; }
-step() { echo -e "\n${BOLD}${BLUE}══ $1 ══${NC}"; }
+V=$'\033[32m'; R=$'\033[31m'; O=$'\033[33m'; G=$'\033[90m'; N=$'\033[0m'
+[ -t 1 ] || { V=""; R=""; O=""; G=""; N=""; }
 
-# ── Bannière ─────────────────────────────────────────────────────────────────
-clear
-echo -e "${BOLD}"
-echo "  ╔═══════════════════════════════════════════════════╗"
-echo "  ║   Système d'acquisition MX800 — HEGP             ║"
-echo "  ║   Installation automatique Raspberry Pi           ║"
-echo "  ╚═══════════════════════════════════════════════════╝"
-echo -e "${NC}"
-echo ""
+etape() { printf '\n%s──  %s%s\n' "$N" "$1" "$N"; }
+ok()    { printf '  [%sok%s] %s\n' "$V" "$N" "$1"; }
+info()  { printf '       %s%s%s\n' "$G" "$1" "$N"; }
+avert() { printf '  [%s! %s] %s\n' "$O" "$N" "$1"; }
+echec() { printf '  [%sNON%s] %s\n' "$R" "$N" "$1" >&2; exit 1; }
 
-# ── Vérifications préalables ─────────────────────────────────────────────────
-step "Vérifications"
+usage() {
+    sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'AIDE'
 
-if [ "$EUID" -eq 0 ]; then
-    err "Ne pas lancer ce script en root. Lancez-le en tant qu'utilisateur normal."
-fi
-
-if ! command -v python3 &>/dev/null; then
-    err "Python3 non trouvé. Installez Raspberry Pi OS Bookworm."
-fi
-
-PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-ok "Python $PYTHON_VERSION détecté"
-
-if ! command -v git &>/dev/null; then
-    info "Installation de git..."
-    sudo apt-get install -y git -q
-fi
-ok "Git disponible"
-
-# ── Questions interactives ────────────────────────────────────────────────────
-step "Configuration"
-
-echo ""
-echo -e "${BOLD}Détection du moniteur Philips MX800${NC}"
-echo -e "  Laissez vide pour la découverte automatique (recommandé)."
-echo -e "  Le moniteur est identifié par son adresse MAC Philips (00:09:FB)."
-read -p "  IP moniteur [auto] : " MONITOR_IP
-if [ -z "$MONITOR_IP" ]; then
-    CONFIG_MONITOR_IP="auto"
-    MONITOR_IP="192.168.100.31"   # utilisée seulement pour dériver le sous-réseau
-    AUTO_DISCOVERY=1
-else
-    CONFIG_MONITOR_IP="$MONITOR_IP"
-    AUTO_DISCOVERY=0
-fi
-
-echo ""
-echo -e "${BOLD}Dossier d'installation ?${NC}"
-echo -e "  Les donnees patients (base SQLite, CSV) y seront stockees."
-read -p "  Dossier [/home/$USER] : " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-/home/$USER}
-INSTALL_DIR="${INSTALL_DIR%/}"
-
-# Les donnees ne doivent JAMAIS atterrir dans un depot git : elles seraient
-# exposees au premier "git add ." (noms de patients, identifiants hospitaliers).
-if [ -d "$INSTALL_DIR/.git" ] || [ "$(basename "$INSTALL_DIR")" = "DEMO_POLL" ]; then
-    echo ""
-    err "« $INSTALL_DIR » est un depot git (ou le dossier du depot).
-    Y installer les donnees patients risquerait de les publier sur GitHub.
-    Choisissez un dossier hors du depot, par exemple /home/$USER."
-fi
-
-# ── Configuration réseau ──────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}Configuration réseau (eth0)${NC}"
-echo -e "  Le RPi doit avoir une IP fixe sur le sous-réseau du moniteur,"
-echo -e "  et servir le BOOTP/DHCP pour que le MX800 obtienne son adresse."
-echo ""
-
-# Détecte l'interface utilisée pour la connexion SSH courante
-SSH_IFACE=""
-if [ -n "$SSH_CONNECTION" ]; then
-    SSH_SERVER_IP=$(echo "$SSH_CONNECTION" | awk '{print $3}')
-    SSH_IFACE=$(ip -o addr show | awk -v ip="$SSH_SERVER_IP" '$4 ~ ip"/" {print $2}' | head -1)
-fi
-
-if [ "$SSH_IFACE" = "eth0" ]; then
-    warn "Votre session SSH passe par eth0 !"
-    warn "Reconfigurer eth0 va couper cette connexion."
-    warn "Utilisez plutôt le WiFi ou Pi Connect pour cette installation."
-    echo ""
-    read -p "  Configurer quand même le réseau ? [o/N] : " SETUP_NET
-    SETUP_NET=${SETUP_NET:-N}
-else
-    read -p "  Configurer le réseau automatiquement ? [O/n] : " SETUP_NET
-    SETUP_NET=${SETUP_NET:-O}
-fi
-
-if [[ "$SETUP_NET" =~ ^[OoYy]$ ]]; then
-    NET_CONFIG=1
-    # Dérive l'IP du RPi et le sous-réseau depuis l'IP du moniteur
-    SUBNET=$(echo "$MONITOR_IP" | cut -d. -f1-3)
-    DEFAULT_RPI_IP="${SUBNET}.1"
-    echo ""
-    echo -e "${BOLD}  IP du Raspberry Pi sur ce sous-réseau ?${NC}"
-    read -p "    IP RPi [$DEFAULT_RPI_IP] : " RPI_IP
-    RPI_IP=${RPI_IP:-$DEFAULT_RPI_IP}
-    DHCP_START="${SUBNET}.31"
-    DHCP_END="${SUBNET}.40"
-else
-    NET_CONFIG=0
-fi
-
-echo ""
-echo -e "${BOLD}Récapitulatif :${NC}"
-echo "  Utilisateur    : $USER"
-if [ "$AUTO_DISCOVERY" = "1" ]; then
-    echo "  Moniteur       : découverte automatique (MAC Philips)"
-else
-    echo "  IP moniteur    : $MONITOR_IP"
-fi
-echo "  Dossier        : $INSTALL_DIR"
-echo "  Repository     : https://github.com/deweynuz/DEMO_POLL"
-if [ "$NET_CONFIG" = "1" ]; then
-    echo "  IP du RPi      : $RPI_IP/24 (eth0)"
-    echo "  Plage DHCP     : $DHCP_START — $DHCP_END"
-else
-    echo "  Réseau         : non modifié"
-fi
-echo ""
-read -p "Confirmer l'installation ? [O/n] : " CONFIRM
-CONFIRM=${CONFIRM:-O}
-if [[ ! "$CONFIRM" =~ ^[OoYy]$ ]]; then
-    echo "Installation annulée."
+Options :
+  --stockage CHEMIN|/dev/sdXN  où écrire les données (défaut /var/lib/mx800)
+  --site NOM                   ex. HEGP
+  --salle NOM                  ex. SALLE1
+  --mac XX:XX:XX:XX:XX:XX      MAC du moniteur (préférable à --ip)
+  --ip A.B.C.D                 adresse fixe du moniteur
+  --non-interactif             ne rien demander ; échoue si une info manque
+  --sans-demarrer              installer sans lancer le service
+  --configurer-reseau          configurer eth0 et dnsmasq (MACHINE NEUVE UNIQUEMENT)
+  -h, --help
+AIDE
     exit 0
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --stockage) STOCKAGE="$2"; shift 2 ;;
+        --site)     SITE="$2"; shift 2 ;;
+        --salle)    SALLE="$2"; shift 2 ;;
+        --mac)      MAC="$2"; shift 2 ;;
+        --ip)       IP="$2"; shift 2 ;;
+        --non-interactif) INTERACTIF=0; shift ;;
+        --sans-demarrer)  DEMARRER=0; shift ;;
+        --configurer-reseau) CONFIGURER_RESEAU=1; shift ;;
+        -h|--help)  usage ;;
+        *) echec "option inconnue : $1  (--help)" ;;
+    esac
+done
+
+demander() {   # demander <invite> <variable> [defaut]
+    local invite="$1" var="$2" defaut="${3:-}" reponse
+    [ -n "${!var}" ] && return 0
+    [ "$INTERACTIF" = 0 ] && echec "$invite manquant (mode non interactif)"
+    read -r -p "  $invite${defaut:+ [$defaut]} : " reponse
+    printf -v "$var" '%s' "${reponse:-$defaut}"
+    [ -n "${!var}" ] || echec "$invite est obligatoire"
+}
+
+# ── Prérequis ───────────────────────────────────────────────────────────────
+etape "Prérequis"
+[ "$(id -u)" -ne 0 ] || echec "ne pas lancer en root : le script appelle sudo au besoin"
+command -v sudo >/dev/null || echec "sudo est requis"
+sudo -v || echec "sudo indisponible"
+command -v python3 >/dev/null || echec "python3 introuvable"
+PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' \
+    || echec "Python $PYVER : 3.11 minimum (tomllib)"
+ok "python3 $PYVER"
+
+for fichier in mx800/service.py mx800/config.py outils/console.py \
+               deploiement/mx800.service; do
+    [ -f "$RACINE/$fichier" ] || echec "fichier manquant dans le dépôt : $fichier"
+done
+ok "dépôt complet"
+
+etape "Dépendances Python"
+if python3 -c 'import h5py, numpy' 2>/dev/null; then
+    ok "h5py et numpy présents"
+else
+    info "installation de h5py et numpy (peut prendre plusieurs minutes sur ARM)"
+    pip install h5py numpy --break-system-packages -q \
+        || echec "installation de h5py/numpy impossible — les courbes en dépendent"
+    ok "h5py et numpy installés"
 fi
 
-# ── Mise à jour système ───────────────────────────────────────────────────────
-step "Mise à jour du système"
-info "Mise à jour des paquets (peut prendre quelques minutes)..."
-sudo apt-get update -q
-sudo apt-get install -y sqlite3 python3-pip -q
-ok "Système à jour"
-
-# ── Configuration réseau eth0 + dnsmasq ──────────────────────────────────────
-if [ "$NET_CONFIG" = "1" ]; then
-    step "Configuration réseau"
-
-    # 1. IP statique sur eth0 via NetworkManager
-    info "Configuration IP statique $RPI_IP/24 sur eth0..."
-
-    CON_NAME=$(nmcli -t -f NAME,DEVICE con show | awk -F: '$2=="eth0" {print $1; exit}')
-    if [ -z "$CON_NAME" ]; then
-        CON_NAME="mx800-lan"
-        sudo nmcli con add type ethernet ifname eth0 con-name "$CON_NAME" &>/dev/null
-    fi
-
-    sudo nmcli con mod "$CON_NAME" \
-        ipv4.method manual \
-        ipv4.addresses "$RPI_IP/24" \
-        ipv4.gateway "" \
-        ipv4.dns "" \
-        ipv4.never-default yes \
-        connection.autoconnect yes
-    sudo nmcli con up "$CON_NAME" &>/dev/null || true
-    ok "eth0 configuré : $RPI_IP/24 (connexion « $CON_NAME »)"
-
-    # 2. dnsmasq — BOOTP + DHCP pour le moniteur
-    info "Installation de dnsmasq..."
-    sudo apt-get install -y dnsmasq -q
-    sudo systemctl stop dnsmasq &>/dev/null || true
-
-    # Sauvegarde de la conf existante
-    if [ -f /etc/dnsmasq.conf ] && [ ! -f /etc/dnsmasq.conf.orig ]; then
-        sudo cp /etc/dnsmasq.conf /etc/dnsmasq.conf.orig
-    fi
-
-    # Sauvegarde d'une conf mx800 existante avant écrasement
-    if [ -f /etc/dnsmasq.d/mx800.conf ]; then
-        sudo cp /etc/dnsmasq.d/mx800.conf "/etc/dnsmasq.d/mx800.conf.bak.$(date +%Y%m%d%H%M%S)"
-        info "Ancienne conf dnsmasq sauvegardée (.bak)"
-    fi
-
-    sudo tee /etc/dnsmasq.d/mx800.conf > /dev/null << DNSMASQEOF
-# Configuration BOOTP pour moniteur Philips — généré par install.sh
-# Ne pas éditer manuellement.
-
+# ── Réseau : vérifié, pas modifié ───────────────────────────────────────────
+etape "Réseau"
+if [ "$CONFIGURER_RESEAU" = 1 ]; then
+    avert "reconfiguration réseau demandée — à ne faire que sur une machine neuve"
+    read -r -p "  Taper OUI pour confirmer : " confirmation
+    [ "$confirmation" = "OUI" ] || echec "reconfiguration réseau annulée"
+    sudo tee /etc/dnsmasq.d/mx800.conf >/dev/null <<'DNS'
 port=0
 interface=eth0
 bind-interfaces
-except-interface=lo
 dhcp-authoritative
 log-dhcp
-
-# Tout equipement Philips Patient Monitoring (OUI 00:09:FB) recoit le tag philips
 dhcp-mac=philips,00:09:FB:*:*:*
-
-# Plage reservee aux moniteurs Philips.
-# Bail infini : le BOOTP ne renouvelle pas, l'adresse doit rester stable.
-dhcp-range=tag:philips,$DHCP_START,$DHCP_END,255.255.255.0,infinite
-
-# ESSENTIEL — Le moniteur demande son adresse en BOOTP, pas en DHCP.
-# Sans bootp-dynamic, dnsmasq journalise "no address configured" et le
-# moniteur ne recoit jamais d'adresse. NE PAS SUPPRIMER.
+dhcp-range=tag:philips,192.168.100.31,192.168.100.40,255.255.255.0,infinite
+# ESSENTIEL — le moniteur demande son adresse en BOOTP, pas en DHCP.
 bootp-dynamic
-DNSMASQEOF
-    sudo systemctl enable dnsmasq &>/dev/null
-    sudo systemctl restart dnsmasq
+DNS
+    sudo systemctl enable --now dnsmasq
+    ok "dnsmasq configuré"
+else
     if systemctl is-active --quiet dnsmasq; then
-        ok "dnsmasq actif — DHCP/BOOTP servi sur eth0 ($DHCP_START—$DHCP_END)"
+        ok "dnsmasq actif (non modifié)"
     else
-        warn "dnsmasq n'a pas démarré. Vérifiez : journalctl -u dnsmasq -n 30"
+        avert "dnsmasq inactif : le moniteur n'obtiendra pas d'adresse"
+    fi
+    if ip -4 addr show eth0 2>/dev/null | grep -q 'inet '; then
+        ok "eth0 : $(ip -4 -brief addr show eth0 | awk '{print $3}') (non modifié)"
+    else
+        avert "eth0 sans adresse IPv4"
     fi
 fi
+NB_MONITEURS=$(grep -ci '00:09:fb' /var/lib/misc/dnsmasq.leases 2>/dev/null || true)
+info "moniteurs Philips dans les baux : ${NB_MONITEURS:-0}"
 
-# ── Dépendances Python ────────────────────────────────────────────────────────
-step "Dépendances Python"
-info "Installation h5py et numpy (waveforms, optionnel)..."
-pip install h5py numpy --break-system-packages -q 2>/dev/null && ok "h5py + numpy installés" || warn "h5py non installé (waveforms désactivés)"
+# ── Stockage ────────────────────────────────────────────────────────────────
+etape "Stockage"
+if [ -z "$STOCKAGE" ] && [ "$INTERACTIF" = 1 ]; then
+    echo "  Où écrire les données ?"
+    echo
+    LIBRE_SD=$(df -m --output=avail / | tail -1 | tr -d ' ')
+    printf '    1) carte SD                %6s Mo libres   %s(usure à surveiller)%s\n' \
+           "$LIBRE_SD" "$G" "$N"
+    mapfile -t DISQUES < <(lsblk -rno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,TRAN 2>/dev/null \
+        | awk '$3=="part" && $6=="usb" {print $1" "$2" "$4" "$5}')
+    i=2
+    for disque in "${DISQUES[@]}"; do
+        printf '    %d) /dev/%-12s %8s  %s  %s\n' "$i" $disque
+        i=$((i+1))
+    done
+    printf '    %d) autre chemin\n\n' "$i"
+    read -r -p "  Choix [1] : " choix; choix="${choix:-1}"
+    if [ "$choix" = "1" ]; then
+        STOCKAGE="$DONNEES_DEFAUT"
+    elif [ "$choix" = "$i" ]; then
+        read -r -p "  Chemin absolu : " STOCKAGE
+    else
+        STOCKAGE="/dev/$(echo "${DISQUES[$((choix-2))]}" | awk '{print $1}')"
+    fi
+fi
+STOCKAGE="${STOCKAGE:-$DONNEES_DEFAUT}"
 
-# ── Clonage / mise à jour GitHub ─────────────────────────────────────────────
-step "Téléchargement des scripts"
-
-REPO_DIR="$INSTALL_DIR/DEMO_POLL"
-
-if [ -d "$REPO_DIR/.git" ]; then
-    info "Repository existant détecté, mise à jour..."
-    cd "$REPO_DIR"
-    git pull -q
-    ok "Repository mis à jour"
+if [[ "$STOCKAGE" == /dev/* ]]; then
+    [ -b "$STOCKAGE" ] || echec "$STOCKAGE n'est pas un périphérique bloc"
+    UUID=$(lsblk -no UUID "$STOCKAGE" | head -1)
+    [ -n "$UUID" ] || echec "$STOCKAGE n'a pas d'UUID : formater d'abord (mkfs.ext4)"
+    POINT=/mnt/mx800
+    sudo mkdir -p "$POINT"
+    if ! grep -q "UUID=$UUID" /etc/fstab; then
+        sudo cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
+        # nofail : un disque absent ne doit JAMAIS empêcher le Pi de démarrer.
+        # Sur une machine sans écran dans un bloc, un boot bloqué en mode
+        # maintenance serait pire que l'absence de données.
+        echo "UUID=$UUID  $POINT  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
+            | sudo tee -a /etc/fstab >/dev/null
+        ok "fstab complété (sauvegarde horodatée conservée)"
+    else
+        ok "fstab contient déjà ce disque"
+    fi
+    sudo systemctl daemon-reload
+    mountpoint -q "$POINT" || sudo mount "$POINT" \
+        || echec "montage de $POINT impossible — fstab restauré manuellement au besoin"
+    mountpoint -q "$POINT" || echec "$POINT n'est pas monté après mount"
+    ok "$STOCKAGE monté sur $POINT (UUID $UUID)"
+    DONNEES="$POINT"
 else
-    info "Clonage du repository..."
-    git clone https://github.com/deweynuz/DEMO_POLL.git "$REPO_DIR" -q
-    ok "Repository cloné dans $REPO_DIR"
+    DONNEES="$STOCKAGE"
+    sudo mkdir -p "$DONNEES"
+    UUID=$(findmnt -no UUID --target "$DONNEES" || true)
+    ok "données sur $DONNEES"
 fi
+sudo chown -R "$UTILISATEUR:$UTILISATEUR" "$DONNEES"
+sudo -u "$UTILISATEUR" mkdir -p "$DONNEES/courbes" "$DONNEES/exports"
 
-# ── Copie des fichiers ────────────────────────────────────────────────────────
-step "Installation des fichiers"
-
-cp "$REPO_DIR/mx800_capture.py" "$INSTALL_DIR/mx800_capture.py"
-ok "mx800_capture.py installé"
-
-if [ -f "$REPO_DIR/discover_monitor.py" ]; then
-    cp "$REPO_DIR/discover_monitor.py" "$INSTALL_DIR/discover_monitor.py"
-    ok "discover_monitor.py installé (découverte automatique)"
+# ── Identité du site ────────────────────────────────────────────────────────
+etape "Identité de ce Pi"
+if [ -f "$CONFIG" ]; then
+    SITE="${SITE:-$(grep -Po '^\s*nom\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
+    SALLE="${SALLE:-$(grep -Po '^\s*salle\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
+    MAC="${MAC:-$(grep -Po '^\s*mac\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
+    info "valeurs reprises de la configuration existante"
 fi
-
-# config.json genere depuis le modele versionne du depot
-if [ ! -f "$REPO_DIR/config.json" ]; then
-    err "config.json introuvable dans le depot."
+demander "Site" SITE "HEGP"
+demander "Salle (étiquette de lit du moniteur)" SALLE
+if [ -z "$MAC" ] && [ -z "$IP" ]; then
+    if [ -s /var/lib/misc/dnsmasq.leases ]; then
+        echo "  Moniteurs Philips visibles :"
+        grep -i '00:09:fb' /var/lib/misc/dnsmasq.leases | awk '{printf "    %s  %s\n", $2, $3}'
+    fi
+    demander "MAC du moniteur de cette salle" MAC
 fi
+ok "site $SITE, salle $SALLE, moniteur ${MAC:-$IP}"
 
-if [ -f "$INSTALL_DIR/config.json" ]; then
-    cp "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.json.bak.$(date +%Y%m%d%H%M%S)"
-    info "config.json existant sauvegarde (.bak)"
+# ── Configuration ───────────────────────────────────────────────────────────
+etape "Configuration"
+sudo mkdir -p "$CONFIG_DIR"
+if [ -f "$CONFIG" ]; then
+    sudo cp "$CONFIG" "$CONFIG.bak.$(date +%Y%m%d%H%M%S)"
+    info "configuration existante sauvegardée"
 fi
+sudo tee "$CONFIG" >/dev/null <<CONFEOF
+# Configuration du service d'acquisition MX800 — générée par install.sh.
+# Modifier puis : sudo systemctl restart mx800.service
+# Toute clé inconnue empêche le démarrage : c'est voulu, une faute de frappe
+# ne doit pas passer pour un réglage pris en compte.
 
-if [ "$REPO_DIR/config.json" = "$INSTALL_DIR/config.json" ]; then
-    err "Le dossier d'installation ne peut pas etre celui du depot."
-fi
+[site]
+nom   = "$SITE"
+salle = "$SALLE"
 
-python3 - "$REPO_DIR/config.json" "$INSTALL_DIR/config.json" \
-         "$CONFIG_MONITOR_IP" "$INSTALL_DIR" << 'PYCONF'
-import json, sys
+[moniteur]
+# L'identité du moniteur est sa MAC : le Pi est serveur DHCP, il résout
+# l'adresse lui-même et suit le moniteur s'il en change.
+mac       = "$MAC"
+ip        = "$IP"
+# L'étiquette de lit annoncée par le moniteur est vérifiée à chaque
+# association. En cas de discordance, le service REFUSE d'enregistrer.
+bed_label = "$SALLE"
+verifier_bed_label = true
 
-src, dst, monitor_ip, install_dir = sys.argv[1:5]
+[acquisition]
+periode_numerics_s       = 1.0
+periode_demographiques_s = 30.0
+intervention_auto        = true
+refuser_mode_demo        = true
+# Courbes : mettre à true ET lister les ondes. Maximum 3 ECG et 8 non-ECG.
+courbes = false
+ondes   = []
+mtu     = 1364
 
-with open(src, encoding='utf-8') as f:
-    cfg = json.load(f)
+[surveillance]
+silence_donnees_s   = 60
+echecs_avant_alerte = 3
+seuil_disque_mo     = 2000
 
-cfg['_comment']  = "Configuration locale — genere par install.sh. Non suivi par git."
-cfg['monitor_ip'] = monitor_ip
-cfg['db_path']    = f"{install_dir}/hegp.db"
-cfg['csv_dir']    = f"{install_dir}/data/"
-cfg['demo_json']  = f"{install_dir}/patient_demo.json"
-cfg['hdf5_dir']   = f"{install_dir}/waves/"
+[stockage]
+chemin = "$DONNEES"
+uuid   = "${UUID:-}"
 
-with open(dst, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-    f.write("\n")
-PYCONF
+[etat]
+chemin = "/run/mx800/status.json"
 
-if [ "$AUTO_DISCOVERY" = "1" ]; then
-    ok "config.json cree (moniteur : decouverte automatique)"
-else
-    ok "config.json cree (moniteur : $MONITOR_IP)"
-fi
+[journal]
+niveau = "INFO"
+CONFEOF
+sudo chown root:"$UTILISATEUR" "$CONFIG"; sudo chmod 640 "$CONFIG"
+ok "$CONFIG"
 
-# ── Création des dossiers ─────────────────────────────────────────────────────
-mkdir -p "$INSTALL_DIR/data"
-mkdir -p "$INSTALL_DIR/waves"
-ok "Dossiers data/ et waves/ créés"
+# Marqueur de volume : la parade au « SSD non monté, on écrit sur la carte SD »
+sudo -u "$UTILISATEUR" PYTHONPATH="$RACINE" python3 - "$DONNEES" "$SITE" "$SALLE" <<'PYEOF'
+import sys
+from mx800.stockage import volume as V
+info = V.ecrire_marqueur(sys.argv[1], site=sys.argv[2], salle=sys.argv[3])
+print(f"       marqueur posé : UUID {info['uuid'] or 'n/a'} sur {info['peripherique'] or '?'}")
+PYEOF
+ok "marqueur de volume posé"
 
-# ── Service systemd ───────────────────────────────────────────────────────────
-step "Service systemd"
+PYTHONPATH="$RACINE" python3 -c "
+from mx800 import config
+config.charger('$CONFIG')
+print('       configuration validée')" || echec "configuration invalide"
 
-SERVICE_FILE="/etc/systemd/system/mx800capture.service"
-
-if [ ! -f "$REPO_DIR/mx800capture.service" ]; then
-    err "mx800capture.service introuvable dans le depot."
-fi
-
-sed -e "s|__USER__|$USER|g" \
-    -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
-    "$REPO_DIR/mx800capture.service" | sudo tee "$SERVICE_FILE" > /dev/null
-
+# ── Service ─────────────────────────────────────────────────────────────────
+etape "Service systemd"
+sed -e "s|__UTILISATEUR__|$UTILISATEUR|g" -e "s|__RACINE__|$RACINE|g" \
+    -e "s|__DONNEES__|$DONNEES|g"        -e "s|__CONFIG__|$CONFIG|g" \
+    "$RACINE/deploiement/mx800.service" | sudo tee "$UNITE" >/dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable mx800capture.service &>/dev/null
-ok "Service mx800capture.service cree et active"
+ok "$UNITE"
 
-# ── Test de connectivité réseau ───────────────────────────────────────────────
-step "Test de connectivité"
-
-info "Recherche du moniteur $MONITOR_IP (30s max)..."
-FOUND=0
-for i in $(seq 1 10); do
-    if ping -c 1 -W 2 "$MONITOR_IP" &>/dev/null; then
-        FOUND=1
-        break
-    fi
-    sleep 1
-done
-
-if [ "$FOUND" = "1" ]; then
-    ok "Moniteur $MONITOR_IP accessible"
-    info "Démarrage du service..."
-    sudo systemctl start mx800capture.service
-    sleep 5
-    if sudo systemctl is-active --quiet mx800capture.service; then
-        ok "Service démarré avec succès"
-    else
-        warn "Service démarré mais vérifiez : journalctl -u mx800capture.service -n 30"
-    fi
-else
-    warn "Moniteur $MONITOR_IP non joignable pour l'instant"
-    echo ""
-    echo -e "  ${BOLD}État du réseau :${NC}"
-    ip -brief addr show eth0 2>/dev/null | sed 's/^/    /'
-    if [ "$NET_CONFIG" = "1" ]; then
-        echo -e "  ${BOLD}Baux DHCP attribués :${NC}"
-        if [ -s /var/lib/misc/dnsmasq.leases ]; then
-            sed 's/^/    /' /var/lib/misc/dnsmasq.leases
-        else
-            echo "    (aucun — le moniteur n'a pas encore demandé d'adresse)"
-        fi
-    fi
-    echo ""
-    echo -e "  ${BOLD}À vérifier :${NC}"
-    echo "    • Câble Ethernet branché entre le RPi et le moniteur"
-    echo "    • Moniteur allumé avec l'export de données activé"
-    echo "    • IP réelle du moniteur (voir les baux DHCP ci-dessus)"
-    echo ""
-    warn "Le service est activé : il se connectera automatiquement dès que le moniteur répondra"
-    sudo systemctl start mx800capture.service &>/dev/null || true
+# Ancien service : arrêté et désactivé, jamais supprimé.
+if systemctl list-unit-files 2>/dev/null | grep -q '^mx800capture.service'; then
+    sudo systemctl disable --now mx800capture.service 2>/dev/null || true
+    avert "ancien mx800capture.service arrêté et désactivé (fichier conservé)"
 fi
 
-# ── Résumé final ─────────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}${GREEN}  Installation terminée !${NC}"
-echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════${NC}"
-echo ""
-echo -e "${BOLD}Fichiers installés :${NC}"
-echo "  $INSTALL_DIR/mx800_capture.py"
-echo "  $INSTALL_DIR/config.json"
-echo "  $INSTALL_DIR/hegp.db       (créé au premier démarrage)"
-echo "  $INSTALL_DIR/data/         (CSV par session)"
-echo ""
-echo -e "${BOLD}Commandes utiles :${NC}"
-echo "  sudo systemctl status mx800capture.service"
-echo "  journalctl -u mx800capture.service -f"
-echo "  sqlite3 $INSTALL_DIR/hegp.db \"SELECT COUNT(*) FROM numerics;\""
-echo ""
-echo -e "${BOLD}Diagnostic réseau :${NC}"
-echo "  ip -brief addr show eth0            # IP du RPi"
-echo "  cat /var/lib/misc/dnsmasq.leases    # adresses attribuées au moniteur"
-echo "  journalctl -u dnsmasq -f            # requêtes BOOTP/DHCP en direct"
-echo "  ping $MONITOR_IP"
-echo ""
-echo -e "${BOLD}Changer l'IP du moniteur :${NC}"
-echo "  nano $INSTALL_DIR/config.json"
-echo "  sudo systemctl restart mx800capture.service"
-echo ""
-echo -e "${BOLD}Activer le BIS :${NC}"
-echo "  nano $INSTALL_DIR/config.json  →  BIS: \"active\": true"
-echo "  sudo systemctl restart mx800capture.service"
-echo ""
+sudo systemctl enable mx800.service >/dev/null
+if [ "$DEMARRER" = 1 ]; then
+    sudo systemctl restart mx800.service
+    sleep 4
+    if systemctl is-active --quiet mx800.service; then
+        ok "service démarré"
+    else
+        echo; sudo journalctl -u mx800.service -n 25 --no-pager
+        echec "le service n'a pas démarré (journal ci-dessus)"
+    fi
+else
+    ok "service installé, non démarré (--sans-demarrer)"
+fi
+
+# ── Vérification ────────────────────────────────────────────────────────────
+etape "Vérification"
+if [ "$DEMARRER" = 1 ]; then
+    sleep 2
+    PYTHONPATH="$RACINE" python3 -m outils.console --config "$CONFIG" etat || true
+fi
+
+cat <<FIN
+
+${V}Installation terminée.${N}
+
+  État              mx800 etat            (ou http://$(hostname -I | awk '{print $1}'):8080/)
+  Diagnostic        mx800 diagnostiquer
+  Interventions     mx800 interventions
+  Export            mx800 exporter CODE
+  Journal           journalctl -u mx800.service -f
+
+  Configuration     sudo nano $CONFIG
+                    sudo systemctl restart mx800.service
+  Données           $DONNEES
+
+FIN

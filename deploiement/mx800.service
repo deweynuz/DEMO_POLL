@@ -1,0 +1,55 @@
+# Unité systemd du service d'acquisition MX800.
+# Les jetons __UTILISATEUR__, __RACINE__, __DONNEES__ et __CONFIG__ sont
+# remplacés par install.sh. Ne pas éditer ce fichier sur la machine :
+# éditer /etc/systemd/system/mx800.service, ou relancer install.sh.
+
+[Unit]
+Description=Acquisition physiologique MX800
+Documentation=https://github.com/deweynuz/DEMO_POLL
+# dnsmasq attribue son adresse au moniteur : sans lui, rien à résoudre.
+After=network-online.target dnsmasq.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+# Type=notify : le service annonce lui-même qu'il est prêt, et alimente le
+# watchdog. C'est ce qui rend impossible un service « actif » qui n'enregistre
+# rien — le module précédent avait Restart=always, qui n'a jamais rien
+# redémarré parce que le processus ne mourait pas.
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
+
+User=__UTILISATEUR__
+Group=__UTILISATEUR__
+WorkingDirectory=__RACINE__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__RACINE__
+ExecStart=/usr/bin/python3 -m mx800.service --config __CONFIG__
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mx800
+
+# Durcissement. Le service n'a besoin d'écrire que dans son volume de données
+# et son répertoire d'exécution ; il lit les baux dnsmasq et appelle ip,
+# findmnt et timedatectl.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RuntimeDirectory=mx800
+RuntimeDirectoryMode=0755
+ReadWritePaths=__DONNEES__
+
+[Install]
+WantedBy=multi-user.target
