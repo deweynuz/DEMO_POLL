@@ -110,6 +110,28 @@ if [ "$CONFIGURER_RESEAU" = 1 ]; then
     avert "reconfiguration réseau demandée — à ne faire que sur une machine neuve"
     read -r -p "  Taper OUI pour confirmer : " confirmation
     [ "$confirmation" = "OUI" ] || echec "reconfiguration réseau annulée"
+
+    # 1. eth0 en adresse fixe. Le Pi est la passerelle du segment moniteur ;
+    #    sans adresse statique, dnsmasq n'a rien à servir.
+    command -v nmcli >/dev/null || echec "nmcli introuvable (NetworkManager requis)"
+    CON=$(nmcli -t -f NAME,DEVICE con show | awk -F: '$2=="eth0" {print $1; exit}')
+    if [ -z "$CON" ]; then
+        CON="mx800-eth0"
+        sudo nmcli con add type ethernet ifname eth0 con-name "$CON" >/dev/null
+    fi
+    sudo nmcli con mod "$CON" ipv4.method manual \
+        ipv4.addresses 192.168.100.1/24 ipv4.gateway "" ipv4.dns "" \
+        connection.autoconnect yes
+    sudo nmcli con up "$CON" >/dev/null 2>&1 || true
+    ip -4 addr show eth0 | grep -q '192\.168\.100\.1' \
+        || echec "eth0 n'a pas pris l'adresse 192.168.100.1"
+    ok "eth0 : 192.168.100.1/24"
+
+    # 2. dnsmasq : DHCP et surtout BOOTP pour les moniteurs Philips
+    command -v dnsmasq >/dev/null || sudo apt-get install -y dnsmasq -q \
+        || echec "installation de dnsmasq impossible"
+    [ -f /etc/dnsmasq.d/mx800.conf ] && sudo cp /etc/dnsmasq.d/mx800.conf \
+        "/etc/dnsmasq.d/mx800.conf.bak.$(date +%Y%m%d%H%M%S)"
     sudo tee /etc/dnsmasq.d/mx800.conf >/dev/null <<'DNS'
 port=0
 interface=eth0
@@ -121,8 +143,11 @@ dhcp-range=tag:philips,192.168.100.31,192.168.100.40,255.255.255.0,infinite
 # ESSENTIEL — le moniteur demande son adresse en BOOTP, pas en DHCP.
 bootp-dynamic
 DNS
-    sudo systemctl enable --now dnsmasq
-    ok "dnsmasq configuré"
+    sudo systemctl enable dnsmasq >/dev/null 2>&1 || true
+    sudo systemctl restart dnsmasq
+    systemctl is-active --quiet dnsmasq \
+        || echec "dnsmasq n'a pas démarré : journalctl -u dnsmasq -n 30"
+    ok "dnsmasq actif — DHCP/BOOTP servi sur eth0 (192.168.100.31-40)"
 else
     if systemctl is-active --quiet dnsmasq; then
         ok "dnsmasq actif (non modifié)"
