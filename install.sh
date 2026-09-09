@@ -40,9 +40,9 @@ usage() {
 Options :
   --stockage CHEMIN|/dev/sdXN  où écrire les données (défaut /var/lib/mx800)
   --site NOM                   ex. HEGP
-  --salle NOM                  ex. SALLE1
-  --mac XX:XX:XX:XX:XX:XX      MAC du moniteur (préférable à --ip)
-  --ip A.B.C.D                 adresse fixe du moniteur
+  --salle NOM                  FIGE la salle (par défaut : celle du moniteur)
+  --mac XX:XX:XX:XX:XX:XX      FIGE le moniteur (par défaut : appris seul)
+  --ip A.B.C.D                 fige l'adresse du moniteur
   --non-interactif             ne rien demander ; échoue si une info manque
   --sans-demarrer              installer sans lancer le service
   --configurer-reseau          configurer eth0 et dnsmasq (MACHINE NEUVE UNIQUEMENT)
@@ -206,15 +206,20 @@ if [ -f "$CONFIG" ]; then
     info "valeurs reprises de la configuration existante"
 fi
 demander "Site" SITE "HEGP"
-demander "Salle (étiquette de lit du moniteur)" SALLE
-if [ -z "$MAC" ] && [ -z "$IP" ]; then
+# La salle et le moniteur ne sont PAS demandés : le Pi les apprend. Il est
+# conçu pour être débranché d'une salle et rebranché dans une autre. Les
+# renseigner (--salle, --mac) épingle et désactive l'apprentissage.
+if [ -n "$SALLE" ] || [ -n "$MAC" ] || [ -n "$IP" ]; then
+    ok "site $SITE — épinglé : salle ${SALLE:-<auto>}, moniteur ${MAC:-${IP:-<auto>}}"
+    avert "valeurs figées : ce Pi ne s'adaptera pas à un changement de salle"
+else
+    ok "site $SITE — salle et moniteur appris automatiquement"
     if [ -s /var/lib/misc/dnsmasq.leases ]; then
-        echo "  Moniteurs Philips visibles :"
-        grep -i '00:09:fb' /var/lib/misc/dnsmasq.leases | awk '{printf "    %s  %s\n", $2, $3}'
+        info "appareils Philips actuellement visibles :"
+        grep -i '00:09:fb' /var/lib/misc/dnsmasq.leases \
+            | awk '{printf "         %s  %s\n", $2, $3}'
     fi
-    demander "MAC du moniteur de cette salle" MAC
 fi
-ok "site $SITE, salle $SALLE, moniteur ${MAC:-$IP}"
 
 # ── Configuration ───────────────────────────────────────────────────────────
 etape "Configuration"
@@ -230,16 +235,22 @@ sudo tee "$CONFIG" >/dev/null <<CONFEOF
 # ne doit pas passer pour un réglage pris en compte.
 
 [site]
-nom   = "$SITE"
+nom = "$SITE"
+# salle vide = celle qu'annonce le moniteur (son étiquette de lit), ou
+# MON-<MAC> s'il n'en annonce pas. Ne renseigner que pour forcer un nom.
 salle = "$SALLE"
 
 [moniteur]
-# L'identité du moniteur est sa MAC : le Pi est serveur DHCP, il résout
-# l'adresse lui-même et suit le moniteur s'il en change.
-mac       = "$MAC"
-ip        = "$IP"
-# L'étiquette de lit annoncée par le moniteur est vérifiée à chaque
-# association. En cas de discordance, le service REFUSE d'enregistrer.
+# mac vide = le moniteur est appris au démarrage : le Pi essaie une fois
+# chaque appareil Philips visible et retient celui qui accepte une
+# association Data Export. L'appairage est mémorisé dans moniteur.json et
+# n'est refait que si ce moniteur disparaît du segment.
+# Renseigner mac pour épingler un appareil précis.
+mac = "$MAC"
+ip  = "$IP"
+appairage_auto = true
+# bed_label non vide = l'étiquette est VÉRIFIÉE à chaque association et une
+# discordance fait refuser l'enregistrement. Vide, elle est simplement suivie.
 bed_label = "$SALLE"
 verifier_bed_label = true
 
