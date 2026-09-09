@@ -28,9 +28,11 @@ from pathlib import Path
 
 log = logging.getLogger('mx800.base')
 
-VERSION_SCHEMA = 1
+VERSION_SCHEMA = 2
 
-SCHEMA_V1 = """
+#: Schéma complet, appliqué tel quel à une base NEUVE. Une base existante
+#: passe par MIGRATIONS, une étape par version.
+SCHEMA_COMPLET = """
 CREATE TABLE sessions (
     id                    INTEGER PRIMARY KEY,
     site                  TEXT NOT NULL,
@@ -52,7 +54,12 @@ CREATE TABLE sessions (
     moniteur_reltime      INTEGER,
     ecart_horloge_s       REAL,
     version_module        TEXT,
-    git_commit            TEXT
+    git_commit            TEXT,
+    -- NOM_ATTR_MODE_OP (PIPG p. 96). Le bit DEMO signale que le moniteur
+    -- fabrique des signaux fictifs : les prendre pour des données cliniques
+    -- serait une faute. On le consigne plutôt que de le déduire après coup.
+    mode_operation        INTEGER,
+    mode_demonstration    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE interventions (
@@ -64,15 +71,23 @@ CREATE TABLE interventions (
     fin_utc          TEXT,
     courbes_actives  INTEGER NOT NULL DEFAULT 0,
     ouverture        TEXT NOT NULL DEFAULT 'auto',   -- auto | manuelle
+    -- Empreinte de l'identifiant patient annoncé par le moniteur. Elle sert à
+    -- reconnaître le MÊME patient après une coupure, sans stocker d'identité
+    -- dans cette base : le nominatif vit dans identites.db, à part.
+    empreinte_patient TEXT,
+    demonstration    INTEGER NOT NULL DEFAULT 0,
     notes            TEXT
 );
+CREATE INDEX idx_interventions_empreinte ON interventions(empreinte_patient);
 
 CREATE TABLE mesures (
     session_id      INTEGER NOT NULL REFERENCES sessions(id),
     intervention_id INTEGER REFERENCES interventions(id),
     ts_utc          TEXT NOT NULL,
     physio_id       INTEGER NOT NULL,
-    nom             TEXT,
+    -- « parametre » et non « nom » : dans une base clinique, une colonne
+    -- nommée `nom` se lit spontanément comme le nom du patient.
+    parametre       TEXT,
     valeur          REAL,
     unite           INTEGER,
     etat            INTEGER NOT NULL,
@@ -118,6 +133,20 @@ CREATE TABLE evenements (
 );
 CREATE INDEX idx_evenements_ts ON evenements(ts_utc);
 """
+
+#: Migrations incrémentales. La v1 n'a jamais été déployée ; la v2 est écrite
+#: malgré tout pour que le mécanisme soit exercé avant d'en avoir besoin.
+MIGRATIONS: dict[int, str] = {
+    2: """
+        ALTER TABLE sessions      ADD COLUMN mode_operation INTEGER;
+        ALTER TABLE sessions      ADD COLUMN mode_demonstration INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE interventions ADD COLUMN empreinte_patient TEXT;
+        ALTER TABLE interventions ADD COLUMN demonstration INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE mesures RENAME COLUMN nom TO parametre;
+        CREATE INDEX IF NOT EXISTS idx_interventions_empreinte
+            ON interventions(empreinte_patient);
+    """,
+}
 
 SCHEMA_IDENTITES = """
 CREATE TABLE identites (
@@ -169,9 +198,19 @@ class Base:
                 f"utiliser une version plus récente du module.")
         if version == 0:
             log.info("Création du schéma v%d dans %s", VERSION_SCHEMA, self.chemin)
-            self.conn.executescript("BEGIN;" + SCHEMA_V1 +
+            self.conn.executescript("BEGIN;" + SCHEMA_COMPLET +
                                     f"PRAGMA user_version={VERSION_SCHEMA};COMMIT;")
-        # les migrations futures s'ajouteront ici, une par version
+            return
+        # Migrations incrémentales, une par version. Chacune doit être sûre sur
+        # une base contenant déjà des données : on ajoute, on ne réécrit pas.
+        for cible in range(version + 1, VERSION_SCHEMA + 1):
+            script = MIGRATIONS.get(cible)
+            if script is None:
+                raise RuntimeError(f"aucune migration vers la version {cible}")
+            log.warning("Migration du schéma %d -> %d de %s", cible - 1, cible,
+                        self.chemin)
+            self.conn.executescript("BEGIN;" + script +
+                                    f"PRAGMA user_version={cible};COMMIT;")
 
     # ── sessions ────────────────────────────────────────────────────────────
 
@@ -193,18 +232,28 @@ class Base:
     # ── interventions ───────────────────────────────────────────────────────
 
     def ouvrir_intervention(self, code: str, *, site: str, salle: str,
-                            courbes: bool = False, ouverture: str = 'auto') -> int:
+                            courbes: bool = False, ouverture: str = 'auto',
+                            empreinte_patient: str | None = None,
+                            demonstration: bool = False) -> int:
         existante = self.conn.execute(
             "SELECT id FROM interventions WHERE code_recherche=?", (code,)).fetchone()
         if existante:
             return existante['id']
         cur = self.conn.execute(
-            "INSERT INTO interventions "
-            "(code_recherche, site, salle, debut_utc, courbes_actives, ouverture) "
-            "VALUES (?,?,?,?,?,?)",
-            (code, site, salle, _utc(), int(courbes), ouverture))
-        log.info("Intervention ouverte : %s (%s)", code, ouverture)
+            "INSERT INTO interventions (code_recherche, site, salle, debut_utc, "
+            "courbes_actives, ouverture, empreinte_patient, demonstration) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (code, site, salle, _utc(), int(courbes), ouverture,
+             empreinte_patient, int(demonstration)))
+        log.info("Intervention ouverte : %s (%s)%s", code, ouverture,
+                 " — MONITEUR EN MODE DÉMONSTRATION" if demonstration else "")
         return cur.lastrowid
+
+    def intervention_pour_empreinte(self, empreinte: str) -> sqlite3.Row | None:
+        """Retrouve une intervention encore ouverte pour ce patient."""
+        return self.conn.execute(
+            "SELECT * FROM interventions WHERE empreinte_patient=? AND fin_utc IS NULL "
+            "ORDER BY id DESC LIMIT 1", (empreinte,)).fetchone()
 
     def fermer_intervention(self, intervention_id: int):
         self.conn.execute("UPDATE interventions SET fin_utc=? WHERE id=? AND fin_utc IS NULL",
@@ -218,10 +267,10 @@ class Base:
     # ── mesures ─────────────────────────────────────────────────────────────
 
     def empiler_mesure(self, *, session_id: int, intervention_id: int | None,
-                       ts_utc: str, physio_id: int, nom: str | None,
+                       ts_utc: str, physio_id: int, parametre: str | None,
                        valeur: float | None, unite: int | None,
                        etat: int, valide: bool):
-        self._lot.append((session_id, intervention_id, ts_utc, physio_id, nom,
+        self._lot.append((session_id, intervention_id, ts_utc, physio_id, parametre,
                           valeur, unite, etat, int(valide)))
 
     def vider_lot(self) -> int:
@@ -232,7 +281,7 @@ class Base:
         with self.conn:
             self.conn.executemany(
                 "INSERT INTO mesures (session_id, intervention_id, ts_utc, physio_id, "
-                "nom, valeur, unite, etat, valide) VALUES (?,?,?,?,?,?,?,?,?)", lot)
+                "parametre, valeur, unite, etat, valide) VALUES (?,?,?,?,?,?,?,?,?)", lot)
         return len(lot)
 
     # ── lacunes et événements ───────────────────────────────────────────────
