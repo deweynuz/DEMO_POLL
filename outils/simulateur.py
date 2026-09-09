@@ -139,15 +139,18 @@ ONDES_DEFAUT = [
 ]
 
 # numerics : (physio_id, unit_code, valeur de base, amplitude)
+# Identifiants et unités relevés dans le catalogue extrait des p. 115-188.
 NUMERICS_DEFAUT = [
-    (0x4182, 0x0AA0,  72.0,  8.0),    # HR, bpm
-    (0x4BB8, 0x0220,  98.0,  1.5),    # SpO2, %
-    (0x4822, 0x0AA0,  72.0,  8.0),    # Pouls
-    (0x4B48, 0x17A0,  36.5,  0.2),    # Température sanguine, °C
-    (0x5000, 0x0F20,  12.0,  1.0),    # Fréquence respiratoire
-    (0x4A15, 0x0F20, 118.0,  9.0),    # ABP systolique, mmHg
-    (0x4A16, 0x0F20,  64.0,  6.0),    # ABP diastolique
-    (0x4A17, 0x0F20,  82.0,  6.0),    # ABP moyenne
+    (0x4182, 0x0AA0,  72.0,  8.0),    # HR    NOM_ECG_CARD_BEAT_RATE, bpm
+    (0x4BB8, 0x0220,  98.0,  1.5),    # SpO2  NOM_PULS_OXIM_SAT_O2, %
+    (0x480A, 0x0AA0,  72.0,  8.0),    # Pouls NOM_PULS_RATE, bpm
+    (0x4B48, 0x17A0,  36.5,  0.2),    # Temp  NOM_TEMP, °C
+    (0x500A, 0x0AA0,  12.0,  1.0),    # RR    NOM_RESP_RATE — et non 0x5000,
+                                      #       qui est l'ONDE d'impédance respiratoire
+    (0x4A15, 0x0F20, 118.0,  9.0),    # ABPs  NOM_PRESS_BLD_ART_ABP_SYS, mmHg
+    (0x4A16, 0x0F20,  64.0,  6.0),    # ABPd
+    (0x4A17, 0x0F20,  82.0,  6.0),    # ABPm
+    (0x4261, 0x0AA0,   0.0,  0.4),    # PVC   NOM_ECG_V_P_C_CNT
 ]
 
 
