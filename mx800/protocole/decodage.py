@@ -174,6 +174,12 @@ class MdsCreate:
     modele: str | None = None
     date_heure: str | None = None       # horloge du moniteur, ISO
     temps_relatif: int | None = None    # RelativeTime, ticks de 1/8 ms
+    mode_operation: int | None = None   # NOM_ATTR_MODE_OP, p. 96
+
+    @property
+    def en_demonstration(self) -> bool:
+        """p. 96 : en mode DEMO le moniteur fabrique des signaux fictifs."""
+        return C.en_demonstration(self.mode_operation)
 
 
 def decoder_mds_create(donnees: bytes) -> MdsCreate:
@@ -212,6 +218,10 @@ def decoder_mds_create(donnees: bytes) -> MdsCreate:
         v = attributs[C.NOM_ATTR_TIME_REL]
         if len(v) >= 4:
             mds.temps_relatif = struct.unpack_from('>I', v, 0)[0]
+    if C.NOM_ATTR_MODE_OP in attributs:
+        v = attributs[C.NOM_ATTR_MODE_OP]
+        if len(v) >= 2:
+            mds.mode_operation = struct.unpack_from('>H', v, 0)[0]
     return mds
 
 
@@ -516,3 +526,79 @@ def decoder_masques_qualite(brut: bytes) -> dict[int, int]:
         ident, valeur = struct.unpack_from('>HH', brut, pos)
         masques[ident] = valeur
     return masques
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Démographiques patient — p. 103-105
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Demographiques:
+    """
+    Contenu de l'objet Patient Demographics. `etat` est le seul champ
+    obligatoire (p. 103) ; tout le reste est facultatif et peut manquer.
+    """
+    etat: int = C.PT_EMPTY
+    patient_id: str = ''
+    nom: str = ''
+    prenom: str = ''
+    sexe: int | None = None
+    type_patient: int | None = None
+    naissance: str = ''
+    taille_cm: float | None = None
+    poids_kg: float | None = None
+
+    @property
+    def admis(self) -> bool:
+        """p. 103 : ADMITTED = informations présentes et valides."""
+        return self.etat == C.PT_ADMITTED
+
+    @property
+    def etat_nom(self) -> str:
+        return C.NOMS_ETAT_PATIENT.get(self.etat, f'0x{self.etat:04X}')
+
+    @property
+    def sexe_nom(self) -> str:
+        return C.SEXES_PATIENT.get(self.sexe, '')
+
+    @property
+    def type_nom(self) -> str:
+        return C.TYPES_PATIENT.get(self.type_patient, '')
+
+    @property
+    def identifiant(self) -> str:
+        """
+        Ce qui distingue un patient d'un autre. On préfère le patient_id ;
+        à défaut le nom, faute de quoi deux patients successifs sans
+        identifiant seraient confondus en une seule intervention.
+        """
+        return self.patient_id.strip() or f"{self.nom}|{self.prenom}".strip('|')
+
+
+def decoder_demographiques(attributs: dict[int, bytes]) -> Demographiques:
+    d = Demographiques()
+
+    def entier(oid):
+        v = attributs.get(oid)
+        return struct.unpack_from('>H', v, 0)[0] if v and len(v) >= 2 else None
+
+    def flottant(oid):
+        v = attributs.get(oid)
+        return decoder_float(struct.unpack_from('>I', v, 0)[0]) if v and len(v) >= 4 else None
+
+    def texte(oid):
+        v = attributs.get(oid)
+        return decoder_chaine(v) if v and len(v) >= 2 else ''
+
+    etat = entier(C.NOM_ATTR_PT_DEMOG_ST)
+    if etat is not None:
+        d.etat = etat
+    d.patient_id = texte(C.NOM_ATTR_PT_ID)
+    d.nom = texte(C.NOM_ATTR_PT_NAME_FAMILY)
+    d.prenom = texte(C.NOM_ATTR_PT_NAME_GIVEN)
+    d.sexe = entier(C.NOM_ATTR_PT_SEX)
+    d.type_patient = entier(C.NOM_ATTR_PT_TYPE)
+    d.naissance = texte(C.NOM_ATTR_PT_DOB)
+    d.taille_cm = flottant(C.NOM_ATTR_PT_HEIGHT)
+    d.poids_kg = flottant(C.NOM_ATTR_PT_WEIGHT)
+    return d

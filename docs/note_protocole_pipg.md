@@ -326,6 +326,21 @@ elle ne doit pas exister dans le code.
 | `decoder_masques_qualite` | SaFixedValSpec16 | 83-84 |
 | `decoder_temps_absolu` | AbsoluteTime (0xff = non supporté) | 62 |
 
+### Démographiques et mode opératoire
+
+| Élément | Structure | Page |
+|---|---|---|
+| `decoder_demographiques` | attributs de l'objet Patient Demographics | 103-105 |
+| `PatDemoState` (EMPTY / PRE_ADMITTED / ADMITTED / DISCHARGED) | p. 103 — seul `ADMITTED` signifie « présentes et valides » | 103 |
+| `PatientType` (adulte / pédiatrique / néonatal) | | 104 |
+| `PatientSex` | | 105 |
+| `NOM_ATTR_MODE_OP`, bit `DEMO = 0x2000` | mode opératoire du moniteur | 96 |
+
+Le bit `DEMO` est capital en recherche : en mode démonstration le moniteur
+fabrique des signaux qui n'ont rien d'un patient. Le module le lit dans le MDS
+Create, le consigne dans la session, et refuse par défaut d'ouvrir une
+intervention (`refuser_mode_demo`).
+
 ### Catalogue (`mx800/protocole/ondes.py`)
 
 55 ondes extraites automatiquement des tables « Waves », p. 179-188.

@@ -99,6 +99,7 @@ NOM_ATTR_ID_BED_LABEL        = 0x091E   # 2334   étiquette de lit (« SALLE1 »
 NOM_ATTR_ID_MODEL            = 0x0928   # 2344   fabricant + modèle
 NOM_ATTR_ID_LABEL            = 0x0924   # 2340   TextId du label d'onde   p. 84
 NOM_ATTR_SYS_ID              = 0x0984   # 2436   identifiant système
+NOM_ATTR_MODE_OP             = 0x0946   # 2374   mode opératoire du moniteur, p. 96
 NOM_ATTR_TIME_ABS            = 0x0987   # 2439   « Date and Time »        p. 62
 NOM_ATTR_TIME_REL            = 0x098F   # 2447   « Relative Time »        p. 62
 NOM_ATTR_SA_SPECN            = 0x096D   # 2413   SaSpec                   p. 83
@@ -279,3 +280,61 @@ FLOAT_NEG_INF = 0x800002
 RORLS_FIRST              = 1
 RORLS_NOT_FIRST_NOT_LAST = 2
 RORLS_LAST               = 3   # dernier ROLRS ; un RORS suit
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Objet Patient Demographics — p. 103-105, identifiants p. 243-244
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOM_ATTR_GRP_PT_DEMOG   = 0x0807   # 2055
+NOM_ATTR_PT_DEMOG_ST    = 0x0957   # 2391  PatDemoState
+NOM_ATTR_PT_TYPE        = 0x0962   # 2402  PatientType
+NOM_ATTR_PT_SEX         = 0x0961   # 2401  PatientSex
+NOM_ATTR_PT_ID          = 0x095A   # 2394  identifiant patient (= PT_LIFETIME_ID)
+NOM_ATTR_PT_NAME_GIVEN  = 0x095D   # 2397
+NOM_ATTR_PT_NAME_FAMILY = 0x095C   # 2396
+NOM_ATTR_PT_DOB         = 0x0958   # 2392
+NOM_ATTR_PT_AGE         = 0x09D8   # 2520
+NOM_ATTR_PT_HEIGHT      = 0x09DC   # 2524
+NOM_ATTR_PT_WEIGHT      = 0x09DF   # 2527
+
+# PatDemoState — p. 103
+PT_EMPTY        = 0
+PT_PRE_ADMITTED = 1   # « currently not used » (p. 103)
+PT_ADMITTED     = 2   # informations présentes et valides
+PT_DISCHARGED   = 8   # données encore là, patient plus assigné à l'appareil
+
+NOMS_ETAT_PATIENT = {PT_EMPTY: 'aucun', PT_PRE_ADMITTED: 'pre_admis',
+                     PT_ADMITTED: 'admis', PT_DISCHARGED: 'sorti'}
+
+# PatientType — p. 104
+TYPES_PATIENT = {0: 'non_specifie', 1: 'adulte', 2: 'pediatrique', 3: 'neonatal'}
+
+# PatientSex — p. 105
+SEXES_PATIENT = {0: 'inconnu', 1: 'masculin', 2: 'feminin', 9: 'non_specifie'}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode opératoire du moniteur — NOM_ATTR_MODE_OP (0x0946), p. 96
+#
+# Le bit DEMO est capital en recherche : en mode démonstration le moniteur
+# fabrique des signaux qui n'ont RIEN d'un patient. Les enregistrer comme des
+# données cliniques serait une faute. Le module le détecte et le consigne.
+# ─────────────────────────────────────────────────────────────────────────────
+
+OPMODE_UNSPEC  = 0x8000
+OPMODE_MONITOR = 0x4000
+OPMODE_DEMO    = 0x2000
+OPMODE_SERVICE = 0x1000
+OPMODE_STANDBY = 0x0002
+OPMODE_CONFIG  = 0x0001
+
+NOMS_MODE_OP = {OPMODE_UNSPEC: 'non_specifie', OPMODE_MONITOR: 'monitorage',
+                OPMODE_DEMO: 'DEMONSTRATION', OPMODE_SERVICE: 'service',
+                OPMODE_STANDBY: 'veille', OPMODE_CONFIG: 'configuration'}
+
+
+def noms_mode_op(mode: int) -> list[str]:
+    return [nom for bit, nom in NOMS_MODE_OP.items() if mode & bit]
+
+
+def en_demonstration(mode: int | None) -> bool:
+    return bool(mode) and bool(mode & OPMODE_DEMO)
