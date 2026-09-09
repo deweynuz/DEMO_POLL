@@ -253,10 +253,16 @@ def cmd_diagnostiquer(args, cfg) -> int:
     """Passe en revue tout ce qui peut empêcher l'acquisition de fonctionner."""
     problemes = []
 
-    def verifier(libelle: str, ok: bool, detail: str = '', bloquant: bool = True):
+    def verifier(libelle: str, ok: bool, detail: str = '', bloquant: bool = True,
+                 explication: str = ''):
+        """
+        `detail` décrit la constatation, `explication` dit pourquoi c'est un
+        problème — et n'apparaît donc que si c'en est un.
+        """
         marque = f"{VERT}ok{NORMAL}" if ok else (f"{ROUGE}NON{NORMAL}" if bloquant
-                                                 else f"{ORANGE}!{NORMAL}")
-        print(f"  [{marque}] {libelle}" + (f"  {GRIS}{detail}{NORMAL}" if detail else ''))
+                                                 else f"{ORANGE}! {NORMAL}")
+        texte = detail if ok or not explication else f"{detail} — {explication}".strip(' —')
+        print(f"  [{marque}] {libelle}" + (f"  {GRIS}{texte}{NORMAL}" if texte else ''))
         if not ok and bloquant:
             problemes.append(libelle)
 
@@ -279,10 +285,14 @@ def cmd_diagnostiquer(args, cfg) -> int:
     print("\nHorloge")
     from mx800.acquisition import _source_horloge
     source, synchro = _source_horloge()
-    verifier("source de temps", source != 'aucune', source, bloquant=False)
-    verifier("horloge synchronisée", synchro,
-             "sans RTC ni NTP, les horodatages ne sont pas défendables",
-             bloquant=False)
+    verifier("source de temps", source != 'aucune', source, bloquant=False,
+             explication="ni RTC matériel ni NTP joignable")
+    verifier("horloge synchronisée", synchro, source, bloquant=False,
+             explication="sans synchronisation, les horodatages ne sont pas "
+                         "défendables en recherche")
+    if source == 'ntp':
+        print(f"       {GRIS}NTP dépend d'une liaison vers l'extérieur. En salle, "
+              f"sans elle et sans RTC, l'horloge dérivera.{NORMAL}")
 
     print("\nRéseau")
     visibles = adressage.inventaire()
@@ -301,7 +311,7 @@ def cmd_diagnostiquer(args, cfg) -> int:
     print("\nService")
     etat, origine = _etat(cfg, args.port)
     verifier("service joignable", origine == 'service', f"port {args.port}",
-             bloquant=False)
+             bloquant=False, explication="service arrêté, ou page d'état désactivée")
     if etat:
         verifier("association établie",
                  etat.get('etat') in ('ASSOCIE', 'ACQUISITION'), etat.get('etat', '?'))

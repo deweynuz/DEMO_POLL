@@ -79,7 +79,9 @@ demander() {   # demander <invite> <variable> [defaut]
 etape "Prérequis"
 [ "$(id -u)" -ne 0 ] || echec "ne pas lancer en root : le script appelle sudo au besoin"
 command -v sudo >/dev/null || echec "sudo est requis"
-sudo -v || echec "sudo indisponible"
+# -n plutôt que -v : avec NOPASSWD, `sudo -v` demande quand même un mot de
+# passe alors que les commandes passent sans.
+sudo -n true 2>/dev/null || echec "sudo demande un mot de passe. Lancer depuis un terminal interactif, ou configurer NOPASSWD."
 command -v python3 >/dev/null || echec "python3 introuvable"
 PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' \
@@ -282,6 +284,16 @@ PYTHONPATH="$RACINE" python3 -c "
 from mx800 import config
 config.charger('$CONFIG')
 print('       configuration validée')" || echec "configuration invalide"
+
+# ── Commande mx800 ──────────────────────────────────────────────────────────
+etape "Commande mx800"
+sudo tee /usr/local/bin/mx800 >/dev/null <<LANCEUR
+#!/usr/bin/env bash
+# Lanceur de la commande d'exploitation. Généré par install.sh.
+exec env PYTHONPATH="$RACINE" python3 -m outils.console --config "$CONFIG" "\$@"
+LANCEUR
+sudo chmod 755 /usr/local/bin/mx800
+ok "/usr/local/bin/mx800"
 
 # ── Service ─────────────────────────────────────────────────────────────────
 etape "Service systemd"
