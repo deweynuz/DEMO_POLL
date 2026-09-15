@@ -859,14 +859,24 @@ class Acquisition:
                                       moniteur_bed_label=nouveau.bed_label)
 
     def _tenter_association(self):
+        # Attente assumée d'un moniteur : Pi débranché, ou rebranché dans une
+        # autre salle. Redémarrer le service n'y changerait rien et polluerait
+        # l'intervention d'une lacune toutes les 90 s. On alimente le watchdog
+        # À CHAQUE TENTATIVE, avant et après : l'appairage peut durer ~40 s et
+        # le backoff plafonne à 60 s. Une boucle qui cesserait de réessayer
+        # (la panne du 3 septembre) cesse aussi d'alimenter systemd.
+        self.rapporteur.signaler_vie_sans_donnees()
         try:
             adresse = self._resoudre_moniteur()
         except adressage.AdresseIntrouvable as e:
             self.machine.abandonner(f"aucun moniteur : {e}")
+            self.rapporteur.signaler_vie_sans_donnees()
             return
         if adresse is None:
             self.machine.abandonner("aucun moniteur")
+            self.rapporteur.signaler_vie_sans_donnees()
             return
+        self.rapporteur.signaler_vie_sans_donnees()
         self.adresse = adresse
         self.machine.transition(Etat.ASSOCIATION, f"Association Request -> {self.adresse}")
         self._t_demande_assoc = self.horloge()

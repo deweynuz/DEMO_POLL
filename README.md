@@ -11,7 +11,8 @@ IntelliVue MX800, pour la recherche clinique en anesthésie-réanimation
 
 ## Installation
 
-**Raspberry Pi neuf** (Raspberry Pi OS Bookworm 64 bits, SSH activé) :
+**Raspberry Pi neuf** (Raspberry Pi OS 64 bits, SSH et Wi-Fi configurés — eth0
+est réservé au moniteur) :
 
 ```bash
 sudo apt update && sudo apt install -y git python3-pip sqlite3

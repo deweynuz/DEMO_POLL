@@ -8,9 +8,11 @@ Deux mécanismes distincts, à ne pas confondre :
 
   sd_notify    informe systemd. **WATCHDOG=1 n'est émis que depuis le chemin de
                données** — une ligne effectivement écrite, ou un keep-alive
-               confirmé en veille assumée. Si plus rien ne s'écrit alors qu'on
-               se croit en acquisition, systemd cesse de recevoir le signal et
-               redémarre le service.
+               confirmé en veille assumée — **ou depuis une tentative
+               d'association** quand aucun moniteur ne répond (Pi débranché,
+               changement de salle). Si plus rien ne s'écrit alors qu'on se
+               croit en acquisition, ou si la boucle cesse de réessayer,
+               systemd cesse de recevoir le signal et redémarre le service.
 
 C'est la réponse structurelle au défaut du module précédent : il avait déjà un
 Restart=always, qui n'a jamais rien redémarré parce que le processus ne mourait

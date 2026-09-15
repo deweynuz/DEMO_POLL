@@ -70,8 +70,9 @@ def executer(chemin_config: Path, *, sans_page: bool = False,
     notificateur = NotificateurSystemd()
     intervalle = notificateur.intervalle_watchdog_s()
     if intervalle:
-        log.info("Watchdog systemd : %.0f s. Il n'est alimenté que par le chemin "
-                 "de données — si plus rien ne s'écrit, systemd redémarre.", intervalle)
+        log.info("Watchdog systemd : %.0f s. Alimenté par le chemin de données, ou "
+                 "par les tentatives d'association sans moniteur — si plus rien ne "
+                 "s'écrit ni ne se tente, systemd redémarre.", intervalle)
 
     base = Base(cfg.base, version_module=VERSION, git_commit=_version_git())
     rapporteur = RapporteurEtat(cfg.chemin_etat, site=cfg.site.nom,

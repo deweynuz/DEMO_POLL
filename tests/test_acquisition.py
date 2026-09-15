@@ -323,3 +323,28 @@ def test_watchdog_donnees_force_la_reassociation(acquisition):
         "SELECT detail FROM lacunes WHERE type='silence_donnees'").fetchall()
     assert silences, "la lacune de silence doit être tracée en base"
     assert acq.machine.etat is not Etat.ACQUISITION
+
+
+def test_sans_moniteur_le_watchdog_est_alimente_par_les_tentatives(acquisition):
+    """
+    Pi débranché, ou en route vers une autre salle : aucun moniteur ne répond.
+    Redémarrer le service n'y changerait rien — il en résultait une lacune
+    « service_redemarre » toutes les 90 s. Tant que la boucle RÉESSAYE, elle
+    alimente le watchdog ; si elle cessait de réessayer, le signal s'arrêterait.
+    """
+    from mx800.etat import NotificateurSystemd
+
+    class Compteur(NotificateurSystemd):      # hors systemd : pret/statut sans effet
+        battements = 0
+        def battement(self):
+            Compteur.battements += 1
+
+    port = port_libre()                       # aucun simulateur : personne ne répond
+    acq, base, rapporteur = acquisition(port)
+    rapporteur.notificateur = Compteur()
+
+    pomper(acq, 7.0)
+    assert acq.machine.etat in (Etat.DECONNECTE, Etat.ASSOCIATION)
+    # t=0 : avant et après l'envoi ; ~5,2 s : timeout puis nouvelle tentative
+    assert Compteur.battements >= 3, Compteur.battements
+    assert base.conn.execute("SELECT count(*) FROM mesures").fetchone()[0] == 0
