@@ -11,17 +11,31 @@ IntelliVue MX800, pour la recherche clinique en anesthésie-réanimation
 
 ## Installation
 
+**Raspberry Pi neuf** (Raspberry Pi OS Bookworm 64 bits, SSH activé) :
+
 ```bash
+sudo apt update && sudo apt install -y git python3-pip sqlite3
 git clone https://github.com/deweynuz/DEMO_POLL.git ~/mx800 && cd ~/mx800
-./install.sh
+./install.sh --configurer-reseau
 ```
 
-Le script demande le site, la salle et la MAC du moniteur, propose le stockage
-(carte SD ou disque USB), génère `/etc/mx800/config.toml`, installe l'unité
-systemd et vérifie que le service démarre. Il est idempotent.
+`--configurer-reseau` (confirmation `OUI` exigée) met `eth0` en
+`192.168.100.1/24` et installe `dnsmasq` en `bootp-dynamic` pour servir une
+adresse au moniteur.
 
-Il **ne reconfigure pas le réseau** : sur un Pi en service, `eth0` et `dnsmasq`
-servent le BOOTP aux moniteurs cliniques.
+**Pi déjà en service** : `./install.sh` sans option. Le réseau est vérifié,
+jamais modifié — `eth0` et `dnsmasq` servent le BOOTP aux moniteurs cliniques.
+
+Le script ne demande que le site. La salle et le moniteur sont appris seuls
+(`--salle` et `--mac` les figent si besoin). Il propose le stockage (carte SD
+ou disque USB), génère `/etc/mx800/config.toml`, installe l'unité systemd et
+vérifie que le service démarre. Il est idempotent.
+
+Vérifier ensuite : `mx800 diagnostiquer` puis `mx800 etat`.
+
+**Mise à jour** : `cd ~/mx800 && git pull && sudo systemctl restart mx800.service`
+
+Détails (heure RTC, courbes, dépannage) : [`docs/exploitation.md`](docs/exploitation.md), section 9.
 
 ## Usage courant
 
