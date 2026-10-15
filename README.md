@@ -15,7 +15,8 @@ IntelliVue MX800, pour la recherche clinique en anesthésie-réanimation
 est réservé au moniteur) :
 
 ```bash
-sudo apt update && sudo apt install -y git python3-pip sqlite3
+sudo apt update && sudo apt install -y git && sudo apt install -y dnsmasq
+python3-pip sqlite3
 git clone https://github.com/deweynuz/DEMO_POLL.git ~/mx800 && cd ~/mx800
 ./install.sh --configurer-reseau
 ```
