@@ -12,6 +12,9 @@ d'erreur disent quoi faire.
     mx800 interventions            ce qui a été enregistré
     mx800 exporter CODE            sortir une intervention en CSV
     mx800 copier                   copier les interventions terminées sur une clé USB
+    mx800 salle [NOM|auto]         voir ou changer le nom de la salle
+    mx800 reseau                   état du réseau ; --configurer pour (re)configurer eth0
+    mx800 wifi [SSID]              lister les réseaux Wi-Fi, ou s'y connecter
     mx800 moniteurs                quels moniteurs sont visibles
     mx800 diagnostiquer            pourquoi ça ne marche pas
 """
@@ -35,6 +38,7 @@ from mx800.protocole import constantes as C
 from mx800.stockage import base as B
 from mx800.stockage import volume as V
 from outils import copie as X
+from outils import reglages as R
 
 VERT, ROUGE, ORANGE, GRIS, NORMAL = '\033[32m', '\033[31m', '\033[33m', '\033[90m', '\033[0m'
 
@@ -386,6 +390,83 @@ def cmd_copier(args, cfg) -> int:
     return 0
 
 
+def cmd_salle(args, cfg) -> int:
+    """Sans argument : la salle actuelle. Avec un nom, ou « auto » : la change."""
+    etat, _ = _etat(cfg, args.port)
+    if args.nom is None:
+        if cfg.site.salle:
+            print(f"salle : {cfg.site.salle}  (nom imposé par « mx800 salle »)")
+        else:
+            actuelle = (etat or {}).get('salle') or 'inconnue tant qu\'aucun moniteur ne répond'
+            print(f"salle : {actuelle}  (automatique : étiquette de lit du moniteur, "
+                  f"ou MON-xxxxxx s'il n'en a pas)")
+        if cfg.moniteur.bed_label:
+            print(f"{ORANGE}épinglé : seul un moniteur étiqueté {cfg.moniteur.bed_label!r} "
+                  f"est accepté — « mx800 salle auto » lève ce verrou{NORMAL}")
+        print(f"{GRIS}  mx800 salle NOM    imposer un nom\n"
+              f"  mx800 salle auto   revenir au nom du moniteur{NORMAL}")
+        return 0
+
+    nom = '' if args.nom.lower() == 'auto' else args.nom.strip()
+    if cfg.base.exists() and not args.forcer:
+        conn = sqlite3.connect(f'file:{cfg.base}?mode=ro', uri=True)
+        ouverte = conn.execute("SELECT code_recherche FROM interventions "
+                               "WHERE fin_utc IS NULL").fetchone()
+        conn.close()
+        if ouverte:
+            print(f"{ROUGE}intervention {ouverte[0]} en cours{NORMAL} : changer la salle "
+                  f"redémarre le service et y laisserait une lacune.\n"
+                  f"  mx800 arreter, puis relancer — ou ajouter --forcer")
+            return 1
+    try:
+        R.regler_salle(args.config, nom)
+    except (R.ErreurReglage, OSError) as e:
+        print(f"{ROUGE}{e}{NORMAL}")
+        return 1
+    print(f"salle : {nom}" if nom else "salle : automatique (celle du moniteur)")
+    if nom:
+        print(f"{GRIS}  ce nom reste en place si le Pi change de salle : le rechanger "
+              f"alors, ou « mx800 salle auto »{NORMAL}")
+    if R.redemarrer_service():
+        print(f"{VERT}service redémarré{NORMAL} — vérifier avec mx800 etat")
+        return 0
+    print(f"{ORANGE}configuration écrite, mais le service n'a pas redémarré : "
+          f"sudo systemctl restart {R.SERVICE}{NORMAL}")
+    return 1
+
+
+def cmd_reseau(args, cfg) -> int:
+    if args.configurer:
+        return R.configurer_reseau()
+    e = R.etat_reseau()
+    oui, non = f"{VERT}oui{NORMAL}", f"{ROUGE}non{NORMAL}"
+    print("Réseau moniteur (eth0)")
+    print(f"  câble branché     {oui if e['cable'] else non}")
+    print(f"  adresse du Pi     {' '.join(e['eth0']) or ROUGE + 'aucune' + NORMAL}")
+    print(f"  dnsmasq (BOOTP)   {oui if e['dnsmasq'] else non}")
+    print(f"  moniteurs Philips ayant reçu une adresse : {len(e['baux_philips'])}")
+    for mac, ip in e['baux_philips']:
+        print(f"    {mac}  {ip}")
+    print("Wi-Fi")
+    print(f"  réseau            {e['wifi'] or 'non connecté'}  {e['wifi_adresse']}")
+    if not e['eth0'] or not e['dnsmasq']:
+        print(f"\n{ORANGE}le moniteur ne peut pas obtenir d'adresse : "
+              f"mx800 reseau --configurer{NORMAL}")
+    print(f"{GRIS}  mx800 reseau --configurer   (re)configurer eth0 et dnsmasq\n"
+          f"  mx800 wifi [SSID]           lister les réseaux, ou s'y connecter\n"
+          f"  mx800 moniteurs             les moniteurs qui répondent{NORMAL}")
+    return 0
+
+
+def cmd_wifi(args, cfg) -> int:
+    if args.ssid is None:
+        return R.wifi_lister()
+    code = R.wifi_connecter(args.ssid)
+    if code == 0:
+        print(f"{VERT}connecté à {args.ssid}{NORMAL} — le Pi s'y reconnectera seul")
+    return code
+
+
 def cmd_moniteurs(args, cfg) -> int:
     visibles = adressage.inventaire()
     if not visibles:
@@ -526,6 +607,21 @@ def principal(argv=None) -> int:
     p.add_argument('--nominatif', action='store_true',
                    help="joindre identites.csv, le lien code <-> patient (données de santé)")
     p.set_defaults(fonction=cmd_copier)
+
+    p = sous.add_parser('salle', help="voir ou changer le nom de la salle")
+    p.add_argument('nom', nargs='?', help="nouveau nom, ou « auto » pour celui du moniteur")
+    p.add_argument('--forcer', action='store_true',
+                   help="changer même pendant une intervention")
+    p.set_defaults(fonction=cmd_salle)
+
+    p = sous.add_parser('reseau', help="état du réseau, ou sa (re)configuration")
+    p.add_argument('--configurer', action='store_true',
+                   help="eth0 en 192.168.100.1 et dnsmasq pour les moniteurs")
+    p.set_defaults(fonction=cmd_reseau)
+
+    p = sous.add_parser('wifi', help="lister les réseaux Wi-Fi, ou s'y connecter")
+    p.add_argument('ssid', nargs='?', help="nom du réseau ; le mot de passe est demandé")
+    p.set_defaults(fonction=cmd_wifi)
 
     p = sous.add_parser('moniteurs', help="quels moniteurs sont visibles")
     p.set_defaults(fonction=cmd_moniteurs)

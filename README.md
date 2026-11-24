@@ -46,6 +46,9 @@ mx800 etat              # est-ce que ça enregistre, là, maintenant ?
 mx800 interventions     # ce qui a été enregistré
 mx800 exporter CODE     # CSV d'une intervention
 mx800 copier            # tout copier sur une clé USB (exFAT), lisible sur Mac et Windows
+mx800 salle [NOM|auto]  # voir ou changer le nom de la salle
+mx800 reseau            # état du réseau ; --configurer pour (re)configurer eth0
+mx800 wifi [SSID]       # lister les réseaux Wi-Fi, ou s'y connecter
 mx800 diagnostiquer     # pourquoi ça ne marche pas
 ```
 
