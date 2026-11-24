@@ -22,6 +22,15 @@ DONNEES_DEFAUT=/var/lib/mx800
 UTILISATEUR="${SUDO_USER:-$USER}"
 
 STOCKAGE=""; SITE=""; SALLE=""; MAC=""; IP=""
+# Courbes : COURBES vide = non décidé en ligne de commande (question posée, ou
+# valeur par défaut). ONDES = liste séparée par des virgules, ou nom d'une
+# sélection type ci-dessous.
+COURBES=""; ONDES=""
+# Sélections types. ABP et ART désignent la même pression artérielle sous deux
+# libellés : le moniteur n'en expose qu'un, selon son réglage. On demande les
+# deux, il retient celui qui existe.
+ONDES_STANDARD="NOM_ECG_ELEC_POTL_II,NOM_PLETH,NOM_PRESS_BLD_ART_ABP,NOM_PRESS_BLD_ART,NOM_AWAY_CO2"
+ONDES_CARDIAQUE="$ONDES_STANDARD,NOM_PRESS_BLD_ART_PULM,NOM_PRESS_BLD_VEN_CENT"
 INTERACTIF=1; DEMARRER=1; CONFIGURER_RESEAU=0
 
 V=$'\033[32m'; R=$'\033[31m'; O=$'\033[33m'; G=$'\033[90m'; N=$'\033[0m'
@@ -43,6 +52,10 @@ Options :
   --salle NOM                  FIGE la salle (par défaut : celle du moniteur)
   --mac XX:XX:XX:XX:XX:XX      FIGE le moniteur (par défaut : appris seul)
   --ip A.B.C.D                 fige l'adresse du moniteur
+  --courbes                    enregistrer les courbes (défaut d'une installation neuve)
+  --sans-courbes               numerics seuls
+  --ondes LISTE                standard, cardiaque, ou noms séparés par des virgules
+                               (max 3 ECG et 8 non-ECG ; implique --courbes)
   --non-interactif             ne rien demander ; échoue si une info manque
   --sans-demarrer              installer sans lancer le service
   --configurer-reseau          configurer eth0 et dnsmasq (MACHINE NEUVE UNIQUEMENT)
@@ -58,6 +71,11 @@ while [ $# -gt 0 ]; do
         --salle)    SALLE="$2"; shift 2 ;;
         --mac)      MAC="$2"; shift 2 ;;
         --ip)       IP="$2"; shift 2 ;;
+        --courbes)      [ "$COURBES" != 0 ] || echec "--courbes et --sans-courbes sont incompatibles"
+                        COURBES=1; shift ;;
+        --sans-courbes) [ "$COURBES" != 1 ] || echec "--courbes et --sans-courbes sont incompatibles"
+                        COURBES=0; shift ;;
+        --ondes)        ONDES="$2"; shift 2 ;;
         --non-interactif) INTERACTIF=0; shift ;;
         --sans-demarrer)  DEMARRER=0; shift ;;
         --configurer-reseau) CONFIGURER_RESEAU=1; shift ;;
@@ -65,6 +83,10 @@ while [ $# -gt 0 ]; do
         *) echec "option inconnue : $1  (--help)" ;;
     esac
 done
+if [ -n "$ONDES" ]; then
+    [ "$COURBES" != 0 ] || echec "--ondes et --sans-courbes sont incompatibles"
+    COURBES=1
+fi
 
 demander() {   # demander <invite> <variable> [defaut]
     local invite="$1" var="$2" defaut="${3:-}" reponse
@@ -283,6 +305,110 @@ else
     fi
 fi
 
+# ── Courbes ─────────────────────────────────────────────────────────────────
+# Activées par défaut sur une installation neuve. Sur un Pi déjà configuré,
+# le réglage existant est proposé (interactif) ou conservé (non interactif) :
+# relancer le script ne doit jamais changer en silence ce qui est enregistré.
+etape "Courbes"
+COURBES_EXIST=""; ONDES_EXIST=""
+if [ -f "$CONFIG" ]; then
+    read -r COURBES_EXIST ONDES_EXIST < <(sudo cat "$CONFIG" | python3 -c '
+import sys, tomllib
+try:
+    acq = tomllib.loads(sys.stdin.read()).get("acquisition", {})
+except Exception:
+    sys.exit(0)
+print("1" if acq.get("courbes") else "0", ",".join(acq.get("ondes") or []))') || true
+fi
+
+if [ -z "$COURBES" ]; then
+    if [ "$INTERACTIF" = 1 ]; then
+        echo "  Les courbes (ECG, pléthysmographie, pressions invasives, CO2) s'ajoutent"
+        echo "  aux numerics : de l'ordre de 6 à 10 Mo/h au lieu de 1 Mo/h."
+        case "$COURBES_EXIST" in
+            1) info "actuellement : activées" ;;
+            0) info "actuellement : désactivées" ;;
+        esac
+        read -r -p "  Enregistrer les courbes ? [O/n] : " reponse
+        case "${reponse:-O}" in
+            [OoYy]*) COURBES=1 ;;
+            [Nn]*)   COURBES=0 ;;
+            *) echec "réponse attendue : O ou n" ;;
+        esac
+    elif [ -n "$COURBES_EXIST" ]; then
+        COURBES="$COURBES_EXIST"
+        info "réglage de la configuration existante conservé (--courbes / --sans-courbes pour le changer)"
+    else
+        COURBES=1
+    fi
+fi
+
+if [ "$COURBES" = 1 ]; then
+    if [ -z "$ONDES" ] && [ "$INTERACTIF" = 1 ]; then
+        echo
+        echo "  Quelles courbes ?"
+        echo
+        echo "    1) standard             ECG II, pléth, pression artérielle, CO2"
+        echo "    2) chirurgie cardiaque  standard + artère pulmonaire + PVC"
+        echo "    3) liste personnalisée"
+        defaut=2
+        if [ -n "$ONDES_EXIST" ]; then
+            echo "    4) conserver la sélection actuelle"
+            info "   ${ONDES_EXIST//,/, }"
+            defaut=4
+        fi
+        echo
+        read -r -p "  Choix [$defaut] : " choix; choix="${choix:-$defaut}"
+        case "$choix" in
+            1) ONDES=standard ;;
+            2) ONDES=cardiaque ;;
+            3) info "noms valides : mx800/protocole/ondes.py (ex. NOM_ECG_ELEC_POTL_II,NOM_PLETH)"
+               read -r -p "  Ondes, séparées par des virgules : " ONDES
+               [ -n "$ONDES" ] || echec "aucune onde saisie" ;;
+            4) [ -n "$ONDES_EXIST" ] || echec "choix invalide : $choix"
+               ONDES="$ONDES_EXIST" ;;
+            *) echec "choix invalide : $choix" ;;
+        esac
+    fi
+    ONDES="${ONDES:-${ONDES_EXIST:-cardiaque}}"
+    case "$ONDES" in
+        standard)  ONDES="$ONDES_STANDARD" ;;
+        cardiaque) ONDES="$ONDES_CARDIAQUE" ;;
+    esac
+    # Contrôle AVANT d'écrire la configuration : une onde inconnue ou en excès
+    # doit arrêter l'installation ici, pas laisser un service qui ne démarre plus.
+    ONDES_TOML=$(PYTHONPATH="$RACINE" python3 - "$ONDES" <<'PYEOF'
+import sys
+from mx800.protocole import ondes as CAT
+noms = [n for n in sys.argv[1].replace(',', ' ').split() if n]
+problemes = [f"onde inconnue : {n!r}" for n in noms if CAT.onde(n) is None]
+if not noms:
+    problemes.append("aucune onde")
+if not problemes:
+    problemes = CAT.verifier_selection([CAT.onde(n).physio_id for n in noms])
+if problemes:
+    for p in problemes:
+        print(f"       {p}", file=sys.stderr)
+    print("       noms valides : mx800/protocole/ondes.py", file=sys.stderr)
+    sys.exit(1)
+print('[' + ', '.join(f'"{n}"' for n in noms) + ']')
+PYEOF
+    ) || echec "sélection d'ondes invalide"
+    COURBES_TOML=true
+    NB_ONDES=$(grep -o '"' <<<"$ONDES_TOML" | wc -l); NB_ONDES=$((NB_ONDES / 2))
+    ok "courbes activées — $NB_ONDES ondes demandées"
+    info "${ONDES//,/, }"
+    info "une onde que le moniteur n'expose pas (capteur absent, autre libellé) est"
+    info "ignorée par lui et signalée dans le journal ; les autres sont enregistrées"
+    if findmnt -no SOURCE --target "$DONNEES" 2>/dev/null | grep -q mmcblk; then
+        avert "données sur la carte SD : les courbes l'usent plus vite — un SSD USB est préférable (--stockage)"
+    fi
+else
+    COURBES_TOML=false; ONDES_TOML="[]"
+    ok "courbes désactivées — numerics seuls"
+    info "pour les activer plus tard : ./install.sh --courbes"
+fi
+
 # ── Configuration ───────────────────────────────────────────────────────────
 etape "Configuration"
 sudo mkdir -p "$CONFIG_DIR"
@@ -321,9 +447,12 @@ periode_numerics_s       = 1.0
 periode_demographiques_s = 30.0
 intervention_auto        = true
 refuser_mode_demo        = true
-# Courbes : mettre à true ET lister les ondes. Maximum 3 ECG et 8 non-ECG.
-courbes = false
-ondes   = []
+# Courbes : true ET une liste d'ondes, ou false ET une liste vide.
+# Maximum 3 ECG et 8 non-ECG. Une onde que le moniteur n'expose pas est ignorée
+# par lui et signalée dans le journal. Noms valides : mx800/protocole/ondes.py.
+# Réglage aussi possible par ./install.sh --courbes | --sans-courbes | --ondes.
+courbes = $COURBES_TOML
+ondes   = $ONDES_TOML
 mtu     = 1364
 
 [surveillance]
@@ -416,5 +545,6 @@ ${V}Installation terminée.${N}
   Configuration     sudo nano $CONFIG
                     sudo systemctl restart mx800.service
   Données           $DONNEES
+  Courbes           $([ "$COURBES" = 1 ] && echo "activées ($NB_ONDES ondes)" || echo "désactivées")  —  ./install.sh --courbes | --sans-courbes | --ondes LISTE
 
 FIN
