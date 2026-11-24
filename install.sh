@@ -230,8 +230,15 @@ if [ -z "$STOCKAGE" ] && [ "$INTERACTIF" = 1 ]; then
     LIBRE_SD=$(df -m --output=avail / | tail -1 | tr -d ' ')
     printf '    1) carte SD                %6s Mo libres   %s(usure à surveiller)%s\n' \
            "$LIBRE_SD" "$G" "$N"
-    mapfile -t DISQUES < <(lsblk -rno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,TRAN 2>/dev/null \
-        | awk '$3=="part" && $6=="usb" {print $1" "$2" "$4" "$5}')
+    # lsblk ne renseigne TRAN (usb) que sur le disque entier, jamais sur ses
+    # partitions : filtrer les partitions sur TRAN ne trouvait donc aucun
+    # disque USB. On part des disques USB, puis on liste leurs partitions (ou
+    # le disque lui-même s'il porte directement un système de fichiers).
+    mapfile -t DISQUES < <(lsblk -dnro NAME,TRAN 2>/dev/null | awk '$2=="usb" {print $1}' \
+        | while read -r usb; do
+              lsblk -nro NAME,SIZE,TYPE,FSTYPE "/dev/$usb" 2>/dev/null \
+                  | awk '$3=="part" || ($3=="disk" && $4!="") {print $1" "$2" "($4==""?"non-formaté":$4)}'
+          done)
     i=2
     for disque in "${DISQUES[@]}"; do
         printf '    %d) /dev/%-12s %8s  %s  %s\n' "$i" $disque
@@ -252,6 +259,10 @@ STOCKAGE="${STOCKAGE:-$DONNEES_DEFAUT}"
 if [[ "$STOCKAGE" == /dev/* ]]; then
     [ -b "$STOCKAGE" ] || echec "$STOCKAGE n'est pas un périphérique bloc"
     UUID=$(lsblk -no UUID "$STOCKAGE" | head -1)
+    FS=$(lsblk -no FSTYPE "$STOCKAGE" | head -1)
+    # Vérifié AVANT de toucher à fstab : une clé livrée en FAT/exFAT a un UUID
+    # mais ne se monte pas en ext4.
+    [ "$FS" = "ext4" ] || echec "$STOCKAGE est en « ${FS:-non formaté} », ext4 attendu. Formater (EFFACE le disque) : sudo mkfs.ext4 $STOCKAGE"
     [ -n "$UUID" ] || echec "$STOCKAGE n'a pas d'UUID : formater d'abord (mkfs.ext4)"
     POINT=/mnt/mx800
     sudo mkdir -p "$POINT"
