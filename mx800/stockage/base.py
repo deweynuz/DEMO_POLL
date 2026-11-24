@@ -332,14 +332,21 @@ class BaseIdentites:
         neuve = not self.chemin.exists()
         self.conn = sqlite3.connect(self.chemin, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        if neuve:
-            os.chmod(self.chemin, 0o600)
-        else:
-            mode = self.chemin.stat().st_mode & 0o777
-            if mode & 0o077:
-                log.warning("permissions %o sur %s : resserrées à 0600",
-                            mode, self.chemin)
+        try:
+            if neuve:
                 os.chmod(self.chemin, 0o600)
+            else:
+                mode = self.chemin.stat().st_mode & 0o777
+                if mode & 0o077:
+                    log.warning("permissions %o sur %s : resserrées à 0600",
+                                mode, self.chemin)
+                    os.chmod(self.chemin, 0o600)
+        except PermissionError as e:
+            # Système de fichiers sans permissions (FAT, exFAT) : on le dit, on
+            # ne s'arrête pas — refuser d'enregistrer serait pire.
+            log.warning("permissions de %s non modifiables (%s) : la base "
+                        "nominative n'est pas protégée par le système de fichiers",
+                        self.chemin, e)
         if self.conn.execute("PRAGMA user_version").fetchone()[0] == 0:
             self.conn.executescript("BEGIN;" + SCHEMA_IDENTITES +
                                     "PRAGMA user_version=1;COMMIT;")

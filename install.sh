@@ -22,6 +22,7 @@ DONNEES_DEFAUT=/var/lib/mx800
 UTILISATEUR="${SUDO_USER:-$USER}"
 
 STOCKAGE=""; SITE=""; SALLE=""; MAC=""; IP=""
+FS=""; IDENTITES=""      # renseignés par l'étape Stockage (clé exFAT)
 # Courbes : COURBES vide = non décidé en ligne de commande (question posée, ou
 # valeur par défaut). ONDES = liste séparée par des virgules, ou nom d'une
 # sélection type ci-dessous.
@@ -47,7 +48,8 @@ usage() {
     cat <<'AIDE'
 
 Options :
-  --stockage CHEMIN|/dev/sdXN  où écrire les données (défaut /var/lib/mx800)
+  --stockage CHEMIN|/dev/sdXN  où écrire les données (défaut /var/lib/mx800) ;
+                               disque ou clé USB en ext4 ou exfat
   --site NOM                   ex. HEGP
   --salle NOM                  FIGE la salle (par défaut : celle du moniteur)
   --mac XX:XX:XX:XX:XX:XX      FIGE le moniteur (par défaut : appris seul)
@@ -260,10 +262,23 @@ if [[ "$STOCKAGE" == /dev/* ]]; then
     [ -b "$STOCKAGE" ] || echec "$STOCKAGE n'est pas un périphérique bloc"
     UUID=$(lsblk -no UUID "$STOCKAGE" | head -1)
     FS=$(lsblk -no FSTYPE "$STOCKAGE" | head -1)
-    # Vérifié AVANT de toucher à fstab : une clé livrée en FAT/exFAT a un UUID
-    # mais ne se monte pas en ext4.
-    [ "$FS" = "ext4" ] || echec "$STOCKAGE est en « ${FS:-non formaté} », ext4 attendu. Formater (EFFACE le disque) : sudo mkfs.ext4 $STOCKAGE"
-    [ -n "$UUID" ] || echec "$STOCKAGE n'a pas d'UUID : formater d'abord (mkfs.ext4)"
+    # Vérifié AVANT de toucher à fstab. Deux formats acceptés :
+    #   ext4   robuste aux coupures de courant, illisible sous Windows ;
+    #   exfat  lisible partout (clé relue sur un PC), mais sans journal ni
+    #          permissions — d'où les précautions plus bas.
+    case "$FS" in
+        ext4)  OPTIONS_MONTAGE="defaults,noatime,nofail,x-systemd.device-timeout=10"; PASSE=2 ;;
+        exfat) # Sans permissions propres, tout appartient à l'utilisateur du
+               # service et reste fermé aux autres comptes du Pi.
+               OPTIONS_MONTAGE="uid=$(id -u "$UTILISATEUR"),gid=$(id -g "$UTILISATEUR"),umask=077,noatime,nofail,x-systemd.device-timeout=10"
+               # fsck.exfat répare au démarrage ce qu'une coupure a laissé.
+               command -v fsck.exfat >/dev/null || sudo apt-get install -y exfatprogs -q >/dev/null 2>&1 || true
+               if command -v fsck.exfat >/dev/null; then PASSE=2; else
+                   PASSE=0; avert "exfatprogs absent : pas de vérification de la clé au démarrage"
+               fi ;;
+        *) echec "$STOCKAGE est en « ${FS:-non formaté} » : ext4 ou exfat attendu. Formater (EFFACE le disque) : sudo mkfs.exfat $STOCKAGE (lisible sous Windows) ou sudo mkfs.ext4 $STOCKAGE" ;;
+    esac
+    [ -n "$UUID" ] || echec "$STOCKAGE n'a pas d'UUID : le reformater"
     POINT=/mnt/mx800
     sudo mkdir -p "$POINT"
     if ! grep -q "UUID=$UUID" /etc/fstab; then
@@ -271,7 +286,7 @@ if [[ "$STOCKAGE" == /dev/* ]]; then
         # nofail : un disque absent ne doit JAMAIS empêcher le Pi de démarrer.
         # Sur une machine sans écran dans un bloc, un boot bloqué en mode
         # maintenance serait pire que l'absence de données.
-        echo "UUID=$UUID  $POINT  ext4  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
+        echo "UUID=$UUID  $POINT  $FS  $OPTIONS_MONTAGE  0  $PASSE" \
             | sudo tee -a /etc/fstab >/dev/null
         ok "fstab complété (sauvegarde horodatée conservée)"
     else
@@ -281,15 +296,28 @@ if [[ "$STOCKAGE" == /dev/* ]]; then
     mountpoint -q "$POINT" || sudo mount "$POINT" \
         || echec "montage de $POINT impossible — fstab restauré manuellement au besoin"
     mountpoint -q "$POINT" || echec "$POINT n'est pas monté après mount"
-    ok "$STOCKAGE monté sur $POINT (UUID $UUID)"
+    ok "$STOCKAGE monté sur $POINT ($FS, UUID $UUID)"
     DONNEES="$POINT"
 else
     DONNEES="$STOCKAGE"
     sudo mkdir -p "$DONNEES"
     UUID=$(findmnt -no UUID --target "$DONNEES" || true)
+    # Un chemin donné à la main peut désigner la clé déjà montée (relance).
+    FS=$(findmnt -no FSTYPE --target "$DONNEES" || true)
     ok "données sur $DONNEES"
 fi
-sudo chown -R "$UTILISATEUR:$UTILISATEUR" "$DONNEES"
+if [ "$FS" = "exfat" ]; then
+    # La base nominative ne va PAS sur la clé : elle serait lisible en
+    # clair par tout ordinateur où on la branche. Elle reste sur le Pi.
+    IDENTITES="$DONNEES_DEFAUT/identites.db"
+    sudo mkdir -p "$DONNEES_DEFAUT"
+    sudo chown "$UTILISATEUR:$UTILISATEUR" "$DONNEES_DEFAUT"; sudo chmod 700 "$DONNEES_DEFAUT"
+    avert "clé exFAT : lisible sous Windows, mais fragile en cas de coupure de courant"
+    info "les identités des patients restent sur le Pi : $IDENTITES"
+    info "avant de retirer la clé : éteindre le Pi (sudo poweroff)"
+fi
+# exFAT n'a pas de propriétaire : il est fixé au montage (uid=, gid=).
+[ "${FS:-}" = "exfat" ] || sudo chown -R "$UTILISATEUR:$UTILISATEUR" "$DONNEES"
 sudo -u "$UTILISATEUR" mkdir -p "$DONNEES/courbes" "$DONNEES/exports"
 
 # ── Identité du site ────────────────────────────────────────────────────────
@@ -474,6 +502,9 @@ seuil_disque_mo     = 2000
 [stockage]
 chemin = "$DONNEES"
 uuid   = "${UUID:-}"
+# identites vide = identites.db dans le volume de données. Renseigné quand ce
+# volume est une clé exFAT : la base nominative reste alors sur le Pi.
+identites = "$IDENTITES"
 
 [etat]
 chemin = "/run/mx800/status.json"
@@ -512,6 +543,7 @@ ok "/usr/local/bin/mx800"
 etape "Service systemd"
 sed -e "s|__UTILISATEUR__|$UTILISATEUR|g" -e "s|__RACINE__|$RACINE|g" \
     -e "s|__DONNEES__|$DONNEES|g"        -e "s|__CONFIG__|$CONFIG|g" \
+    -e "s|__IDENTITES_DIR__|$(dirname "${IDENTITES:-$DONNEES/identites.db}")|g" \
     "$RACINE/deploiement/mx800.service" | sudo tee "$UNITE" >/dev/null
 sudo systemctl daemon-reload
 ok "$UNITE"

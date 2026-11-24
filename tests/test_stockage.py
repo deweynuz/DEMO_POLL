@@ -171,3 +171,18 @@ def test_volume_sature_refuse(tmp_path):
     V.ecrire_marqueur(tmp_path, site='HEGP', salle='SALLE1')
     with pytest.raises(V.VolumeInvalide, match='Arrêt volontaire'):
         V.verifier(tmp_path, site='HEGP', salle='SALLE1', seuil_libre_mo=10 ** 9)
+
+
+def test_base_nominative_hors_du_volume(tmp_path):
+    """Clé exFAT : la base nominative peut rester sur le Pi, hors de la clé."""
+    from pathlib import Path
+    from mx800 import config
+    f = tmp_path / 'c.toml'
+    f.write_text('[site]\nnom = "HEGP"\n[stockage]\nchemin = "/mnt/mx800"\n')
+    assert config.charger(f).base_identites == Path('/mnt/mx800/identites.db')
+    f.write_text('[site]\nnom = "HEGP"\n[stockage]\nchemin = "/mnt/mx800"\n'
+                 'identites = "/var/lib/mx800/identites.db"\n')
+    assert config.charger(f).base_identites == Path('/var/lib/mx800/identites.db')
+    f.write_text('[site]\nnom = "HEGP"\n[stockage]\nidentites = "relatif.db"\n')
+    with pytest.raises(config.ErreurConfiguration):
+        config.charger(f)

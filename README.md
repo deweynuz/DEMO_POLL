@@ -28,8 +28,8 @@ adresse au moniteur.
 jamais modifié — `eth0` et `dnsmasq` servent le BOOTP aux moniteurs cliniques.
 
 Le script ne demande que le site. La salle et le moniteur sont appris seuls
-(`--salle` et `--mac` les figent si besoin). Il propose le stockage (carte SD
-ou disque USB) et l'enregistrement des courbes — activé par défaut, réglable
+(`--salle` et `--mac` les figent si besoin). Il propose le stockage (carte SD,
+disque ou clé USB en ext4 ou exFAT) et l'enregistrement des courbes — activé par défaut, réglable
 par `--courbes`, `--sans-courbes` et `--ondes` —, génère `/etc/mx800/config.toml`, installe l'unité systemd et
 vérifie que le service démarre. Il est idempotent.
 

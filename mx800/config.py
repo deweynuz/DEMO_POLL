@@ -77,6 +77,10 @@ class Stockage:
     chemin: Path = Path('/var/lib/mx800')
     uuid: str = ''
     marqueur: str = '.mx800-stockage'
+    #: Chemin de la base nominative. Vide = dans le volume de données. À
+    #: renseigner quand ce volume est amovible et sans permissions (clé exFAT) :
+    #: les identités restent alors sur le Pi et ne voyagent pas avec la clé.
+    identites: str = ''
 
 
 @dataclass
@@ -100,6 +104,8 @@ class Configuration:
     @property
     def base_identites(self) -> Path:
         """Base nominative, séparée et à permissions restreintes."""
+        if self.stockage.identites:
+            return Path(self.stockage.identites)
         return self.stockage.chemin / 'identites.db'
 
     @property
@@ -123,7 +129,7 @@ _SECTIONS = {
                      'ondes', 'mtu', 'intervention_auto', 'refuser_mode_demo'},
     'surveillance': {'silence_donnees_s', 'echecs_avant_alerte', 'seuil_disque_mo',
                      'backoff_min_s', 'backoff_max_s'},
-    'stockage':     {'chemin', 'uuid', 'marqueur'},
+    'stockage':     {'chemin', 'uuid', 'marqueur', 'identites'},
     'journal':      {'niveau'},
     'etat':         {'chemin'},
 }
@@ -210,6 +216,9 @@ def valider(brut: dict) -> Configuration:
     chemin = sto.get('chemin', '/var/lib/mx800')
     if not str(chemin).startswith('/'):
         problemes.append(f"[stockage] chemin doit être absolu : {chemin!r}")
+    identites = sto.get('identites', '') or ''
+    if identites and not str(identites).startswith('/'):
+        problemes.append(f"[stockage] identites doit être un chemin absolu : {identites!r}")
 
     niveau = brut.get('journal', {}).get('niveau', 'INFO')
     if niveau not in ('DEBUG', 'INFO', 'WARNING', 'ERROR'):
@@ -238,7 +247,8 @@ def valider(brut: dict) -> Configuration:
             backoff_min_s=float(sur.get('backoff_min_s', 1.0)),
             backoff_max_s=float(sur.get('backoff_max_s', 60.0))),
         stockage=Stockage(chemin=Path(chemin), uuid=sto.get('uuid', ''),
-                          marqueur=sto.get('marqueur', '.mx800-stockage')),
+                          marqueur=sto.get('marqueur', '.mx800-stockage'),
+                          identites=str(identites)),
         niveau_journal=niveau,
         chemin_etat=Path(brut.get('etat', {}).get('chemin', '/run/mx800/status.json')),
     )

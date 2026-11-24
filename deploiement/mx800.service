@@ -1,5 +1,5 @@
 # Unité systemd du service d'acquisition MX800.
-# Les jetons __UTILISATEUR__, __RACINE__, __DONNEES__ et __CONFIG__ sont
+# Les jetons __UTILISATEUR__, __RACINE__, __DONNEES__, __IDENTITES_DIR__ et __CONFIG__ sont
 # remplacés par install.sh. Ne pas éditer ce fichier sur la machine :
 # éditer /etc/systemd/system/mx800.service, ou relancer install.sh.
 
@@ -50,6 +50,9 @@ RestrictSUIDSGID=yes
 RuntimeDirectory=mx800
 RuntimeDirectoryMode=0755
 ReadWritePaths=__DONNEES__
+# Répertoire de la base nominative quand elle n'est pas dans le volume de
+# données (clé exFAT). Identique à la ligne précédente sinon.
+ReadWritePaths=__IDENTITES_DIR__
 
 [Install]
 WantedBy=multi-user.target
