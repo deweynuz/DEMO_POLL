@@ -568,7 +568,7 @@ ${V}Installation terminée.${N}
   Interventions     mx800 interventions
   Export            mx800 exporter CODE
   Clé USB           mx800 copier          (brancher une clé exFAT ; --supprimer libère le Pi)
-  Réglages          mx800 salle [NOM|auto]   ·   mx800 reseau   ·   mx800 wifi [SSID]
+  Réglages          mx800 salle [NOM|auto]   ·   mx800 reseau   ·   mx800 wifi [ajouter NOM]
   Journal           journalctl -u mx800.service -f
 
   Configuration     sudo nano $CONFIG

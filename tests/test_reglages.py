@@ -95,3 +95,14 @@ def test_salle_refusee_pendant_une_intervention(pi, capsys):
     assert f.read_text() == avant and redemarrages == []
     assert lancer(f, 'salle', 'Bloc 4', '--forcer') == 0
     assert K.charger(f).site.salle == 'Bloc 4'
+
+
+def test_profil_wifi():
+    profil = R.profil_wifi('Bloc HEGP', 'motdepasse1')
+    assert 'ssid=Bloc HEGP' in profil and 'psk=motdepasse1' in profil
+    assert 'autoconnect=true' in profil
+    assert 'wifi-security' not in R.profil_wifi('Ouvert', '')
+    for ssid, mdp in (('', 'motdepasse1'), ('a;b', 'motdepasse1'), ('ok', 'court'),
+                      ('x' * 33, 'motdepasse1'), ('ok', 'a\nb' * 5)):
+        with pytest.raises(R.ErreurReglage):
+            R.profil_wifi(ssid, mdp)

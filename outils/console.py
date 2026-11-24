@@ -14,7 +14,7 @@ d'erreur disent quoi faire.
     mx800 copier                   copier les interventions terminées sur une clé USB
     mx800 salle [NOM|auto]         voir ou changer le nom de la salle
     mx800 reseau                   état du réseau ; --configurer pour (re)configurer eth0
-    mx800 wifi [SSID]              lister les réseaux Wi-Fi, ou s'y connecter
+    mx800 wifi [ajouter NOM]       lister les réseaux Wi-Fi, ou en enregistrer un pour plus tard
     mx800 moniteurs                quels moniteurs sont visibles
     mx800 diagnostiquer            pourquoi ça ne marche pas
 """
@@ -453,18 +453,36 @@ def cmd_reseau(args, cfg) -> int:
         print(f"\n{ORANGE}le moniteur ne peut pas obtenir d'adresse : "
               f"mx800 reseau --configurer{NORMAL}")
     print(f"{GRIS}  mx800 reseau --configurer   (re)configurer eth0 et dnsmasq\n"
-          f"  mx800 wifi [SSID]           lister les réseaux, ou s'y connecter\n"
+          f"  mx800 wifi [ajouter NOM]    lister les réseaux, ou en enregistrer un\n"
           f"  mx800 moniteurs             les moniteurs qui répondent{NORMAL}")
     return 0
 
 
 def cmd_wifi(args, cfg) -> int:
-    if args.ssid is None:
-        return R.wifi_lister()
-    code = R.wifi_connecter(args.ssid)
-    if code == 0:
-        print(f"{VERT}connecté à {args.ssid}{NORMAL} — le Pi s'y reconnectera seul")
-    return code
+    """
+    Liste, ou ENREGISTRE un réseau pour plus tard. Ne quitte jamais le réseau
+    en cours : ce Pi est souvent piloté à distance par ce même Wi-Fi.
+    """
+    if args.action is None:
+        code = R.wifi_lister()
+        print(f"{GRIS}  mx800 wifi ajouter \"NOM\"   enregistrer un réseau pour plus tard, "
+              f"sans quitter le réseau actuel{NORMAL}")
+        return code
+    if not args.ssid:
+        print("préciser le nom du réseau : mx800 wifi ajouter \"NOM\"")
+        return 1
+    import getpass
+    try:
+        mot_de_passe = getpass.getpass(f"Mot de passe de « {args.ssid} » (vide si réseau ouvert) : ")
+        R.wifi_ajouter(args.ssid, mot_de_passe)
+    except (R.ErreurReglage, EOFError, KeyboardInterrupt) as e:
+        print(f"{ROUGE}{e or 'annulé'}{NORMAL}")
+        return 1
+    print(f"{VERT}« {args.ssid} » enregistré.{NORMAL} La connexion actuelle n'a pas changé ;\n"
+          f"le Pi rejoindra ce réseau seul quand il sera à portée et sans autre réseau connu.")
+    print(f"{ORANGE}Le mot de passe n'a pas pu être vérifié : il ne le sera qu'à la "
+          f"première connexion.{NORMAL}")
+    return 0
 
 
 def cmd_moniteurs(args, cfg) -> int:
@@ -619,7 +637,8 @@ def principal(argv=None) -> int:
                    help="eth0 en 192.168.100.1 et dnsmasq pour les moniteurs")
     p.set_defaults(fonction=cmd_reseau)
 
-    p = sous.add_parser('wifi', help="lister les réseaux Wi-Fi, ou s'y connecter")
+    p = sous.add_parser('wifi', help="lister les réseaux Wi-Fi, ou en enregistrer un pour plus tard")
+    p.add_argument('action', nargs='?', choices=['ajouter'])
     p.add_argument('ssid', nargs='?', help="nom du réseau ; le mot de passe est demandé")
     p.set_defaults(fonction=cmd_wifi)
 

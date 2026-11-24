@@ -154,12 +154,56 @@ def configurer_reseau() -> int:
 
 
 def wifi_lister() -> int:
-    return subprocess.run(['nmcli', 'dev', 'wifi', 'list', '--rescan', 'yes'],
-                          check=False).returncode
+    """Réseaux enregistrés, puis réseaux visibles. Ne change rien."""
+    print("Réseaux enregistrés (le Pi s'y connecte seul quand ils sont à portée) :")
+    connus = [l.split(':')[0] for l in _sortie(
+        'nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show').splitlines()
+        if l.endswith(':802-11-wireless')]
+    for nom in connus or ['(aucun)']:
+        print(f"  {nom}")
+    print("\nRéseaux visibles :")
+    try:
+        return subprocess.run(['nmcli', '-f', 'IN-USE,SSID,SIGNAL,SECURITY', 'dev', 'wifi',
+                               'list'], check=False).returncode
+    except OSError:
+        print("  nmcli introuvable (NetworkManager requis)")
+        return 1
 
 
-def wifi_connecter(ssid: str) -> int:
-    # --ask : nmcli demande lui-même le mot de passe, qui ne passe ni par cette
-    # commande, ni par l'historique du shell.
-    return subprocess.run(['sudo', 'nmcli', '--ask', 'dev', 'wifi', 'connect', ssid],
-                          check=False).returncode
+def profil_wifi(ssid: str, mot_de_passe: str) -> str:
+    """
+    Profil NetworkManager d'un réseau à ENREGISTRER, pas à rejoindre tout de
+    suite. La connexion en cours n'est pas touchée : le Pi ne bascule sur ce
+    réseau que lorsqu'il n'en a plus d'autre, typiquement après un déménagement.
+    """
+    if not ssid or len(ssid.encode()) > 32 or any(c in ssid for c in '\n\r;'):
+        raise ErreurReglage("nom de réseau invalide (32 octets au plus, sans « ; »)")
+    if any(c in mot_de_passe for c in '\n\r'):
+        raise ErreurReglage("mot de passe invalide")
+    if mot_de_passe and not 8 <= len(mot_de_passe) <= 63:
+        raise ErreurReglage("un mot de passe Wi-Fi fait entre 8 et 63 caractères")
+    securite = (f"\n[wifi-security]\nkey-mgmt=wpa-psk\npsk={mot_de_passe}\n"
+                if mot_de_passe else "")
+    return (f"[connection]\nid={ssid}\ntype=wifi\nautoconnect=true\n\n"
+            f"[wifi]\nmode=infrastructure\nssid={ssid}\n{securite}\n"
+            f"[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n")
+
+
+def wifi_ajouter(ssid: str, mot_de_passe: str) -> None:
+    """
+    Enregistre le réseau sans s'y connecter. Le profil est écrit par sudo
+    depuis l'entrée standard : le mot de passe n'apparaît ni dans la ligne de
+    commande, ni dans la liste des processus.
+    """
+    contenu = profil_wifi(ssid, mot_de_passe)
+    nom = re.sub(r'[^A-Za-z0-9_-]', '_', ssid)
+    chemin = f"/etc/NetworkManager/system-connections/mx800-{nom}.nmconnection"
+    r = subprocess.run(['sudo', 'install', '-m', '600', '-o', 'root', '-g', 'root',
+                        '/dev/stdin', chemin], input=contenu, text=True,
+                       capture_output=True, check=False)
+    if r.returncode != 0:
+        raise ErreurReglage(f"écriture du profil impossible : {r.stderr.strip()}")
+    r = subprocess.run(['sudo', 'nmcli', 'con', 'reload'], capture_output=True, text=True,
+                       check=False)
+    if r.returncode != 0:
+        raise ErreurReglage(f"NetworkManager n'a pas relu les profils : {r.stderr.strip()}")

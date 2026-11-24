@@ -48,7 +48,7 @@ mx800 exporter CODE     # CSV d'une intervention
 mx800 copier            # tout copier sur une clé USB (exFAT), lisible sur Mac et Windows
 mx800 salle [NOM|auto]  # voir ou changer le nom de la salle
 mx800 reseau            # état du réseau ; --configurer pour (re)configurer eth0
-mx800 wifi [SSID]       # lister les réseaux Wi-Fi, ou s'y connecter
+mx800 wifi [ajouter NOM]  # lister les réseaux Wi-Fi, ou en enregistrer un pour plus tard
 mx800 diagnostiquer     # pourquoi ça ne marche pas
 ```
 
