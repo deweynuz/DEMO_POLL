@@ -54,6 +54,7 @@ Options :
   --site NOM                   ex. HEGP
   --salle NOM                  FIGE la salle (par défaut : celle du moniteur)
   --mac XX:XX:XX:XX:XX:XX      FIGE le moniteur (par défaut : appris seul)
+                               « auto » lève un épinglage existant : --salle auto --mac auto
   --ip A.B.C.D                 fige l'adresse du moniteur
   --courbes                    enregistrer les courbes (défaut d'une installation neuve)
   --sans-courbes               numerics seuls
@@ -365,13 +366,26 @@ sudo -u "$UTILISATEUR" mkdir -p "$DONNEES/courbes" "$DONNEES/exports"
 
 # ── Identité du site ────────────────────────────────────────────────────────
 etape "Identité de ce Pi"
+SALLE_DEMANDEE="$SALLE"; MAC_DEMANDEE="$MAC"
 if [ -f "$CONFIG" ]; then
     SITE="${SITE:-$(grep -Po '^\s*nom\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
     SALLE="${SALLE:-$(grep -Po '^\s*salle\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
     MAC="${MAC:-$(grep -Po '^\s*mac\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)}"
     info "valeurs reprises de la configuration existante"
 fi
+# « auto » efface un épinglage hérité de la configuration existante.
+[ "$SALLE" = auto ] && SALLE=""
+[ "$MAC" = auto ] && MAC=""
 demander "Site" SITE "HEGP"
+# Un épinglage repris d'une ancienne configuration se reconduit à chaque
+# relance sans que personne l'ait redemandé, et le Pi refuse alors tout autre
+# moniteur. On le dit, et on propose de le lever.
+if [ "$INTERACTIF" = 1 ] && [ -z "$SALLE_DEMANDEE$MAC_DEMANDEE" ] && [ -n "$SALLE$MAC" ]; then
+    avert "ce Pi est épinglé : salle ${SALLE:-<auto>}, moniteur ${MAC:-<auto>}"
+    info "branché sur un autre moniteur, il refusera d'enregistrer"
+    read -r -p "  Le laisser s'adapter au moniteur branché ? [o/N] : " reponse
+    case "${reponse:-N}" in [OoYy]*) SALLE=""; MAC="" ;; esac
+fi
 # La salle et le moniteur ne sont PAS demandés : le Pi les apprend. Il est
 # conçu pour être débranché d'une salle et rebranché dans une autre. Les
 # renseigner (--salle, --mac) épingle et désactive l'apprentissage.

@@ -305,7 +305,8 @@ def cmd_copier(args, cfg) -> int:
         en_cours = conn.execute("SELECT code_recherche FROM interventions "
                                 "WHERE fin_utc IS NULL").fetchall()
         for l in en_cours:
-            print(f"{GRIS}  {l[0]} : en cours, non copiée{NORMAL}")
+            print(f"{ORANGE}  {l[0]} : en cours, non copiée — « mx800 arreter » pour la "
+                  f"clore, puis relancer{NORMAL}")
         if not a_copier:
             print("aucune intervention terminée à copier")
             return 0
