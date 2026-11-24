@@ -23,6 +23,7 @@ UTILISATEUR="${SUDO_USER:-$USER}"
 
 STOCKAGE=""; SITE=""; SALLE=""; MAC=""; IP=""
 FS=""; IDENTITES=""      # renseignés par l'étape Stockage (clé exFAT)
+IDENTITES_OU=""          # cle | pi : où ranger la base nominative (clé exFAT)
 # Courbes : COURBES vide = non décidé en ligne de commande (question posée, ou
 # valeur par défaut). ONDES = liste séparée par des virgules, ou nom d'une
 # sélection type ci-dessous.
@@ -58,6 +59,8 @@ Options :
   --sans-courbes               numerics seuls
   --ondes LISTE                standard, cardiaque, ou noms séparés par des virgules
                                (max 3 ECG et 8 non-ECG ; implique --courbes)
+  --identites cle|pi           clé exFAT : noms des patients sur la clé, ou gardés
+                               sur le Pi (défaut d'une installation neuve : pi)
   --non-interactif             ne rien demander ; échoue si une info manque
   --sans-demarrer              installer sans lancer le service
   --configurer-reseau          configurer eth0 et dnsmasq (MACHINE NEUVE UNIQUEMENT)
@@ -78,6 +81,9 @@ while [ $# -gt 0 ]; do
         --sans-courbes) [ "$COURBES" != 1 ] || echec "--courbes et --sans-courbes sont incompatibles"
                         COURBES=0; shift ;;
         --ondes)        ONDES="$2"; shift 2 ;;
+        --identites)    case "$2" in cle|pi) IDENTITES_OU="$2" ;;
+                            *) echec "--identites attend cle ou pi" ;; esac
+                        shift 2 ;;
         --non-interactif) INTERACTIF=0; shift ;;
         --sans-demarrer)  DEMARRER=0; shift ;;
         --configurer-reseau) CONFIGURER_RESEAU=1; shift ;;
@@ -307,14 +313,51 @@ else
     ok "données sur $DONNEES"
 fi
 if [ "$FS" = "exfat" ]; then
-    # La base nominative ne va PAS sur la clé : elle serait lisible en
-    # clair par tout ordinateur où on la branche. Elle reste sur le Pi.
-    IDENTITES="$DONNEES_DEFAUT/identites.db"
-    sudo mkdir -p "$DONNEES_DEFAUT"
-    sudo chown "$UTILISATEUR:$UTILISATEUR" "$DONNEES_DEFAUT"; sudo chmod 700 "$DONNEES_DEFAUT"
     avert "clé exFAT : lisible sous Windows, mais fragile en cas de coupure de courant"
-    info "les identités des patients restent sur le Pi : $IDENTITES"
     info "avant de retirer la clé : éteindre le Pi (sudo poweroff)"
+    # Où ranger identites.db (correspondance code de recherche <-> patient) ?
+    # Sur une clé exFAT elle est lisible en clair par tout ordinateur où on
+    # la branche : c'est une décision de l'utilisateur, pas du script.
+    if [ -z "$IDENTITES_OU" ]; then
+        # Réglage actuel : clé « identites » renseignée = sur le Pi ; config
+        # existante sans elle = dans le volume, donc sur la clé.
+        ACTUEL=pi
+        if [ -f "$CONFIG" ] && [ -z "$(sudo grep -Po '^\s*identites\s*=\s*"\K[^"]+' "$CONFIG" | head -1 || true)" ]; then
+            ACTUEL=cle
+        fi
+        if [ "$INTERACTIF" = 1 ]; then
+            echo
+            echo "  Où ranger les noms des patients (correspondance code de recherche <-> patient) ?"
+            echo
+            echo "    1) sur la clé   tout au même endroit ; lisible par quiconque a la clé"
+            echo "    2) sur le Pi    la clé ne porte que des données pseudonymisées"
+            echo
+            defaut=2; [ "$ACTUEL" = cle ] && defaut=1
+            read -r -p "  Choix [$defaut] : " choix
+            case "${choix:-$defaut}" in
+                1) IDENTITES_OU=cle ;;
+                2) IDENTITES_OU=pi ;;
+                *) echec "choix invalide : $choix" ;;
+            esac
+        else
+            IDENTITES_OU="$ACTUEL"
+        fi
+    fi
+    if [ "$IDENTITES_OU" = pi ]; then
+        IDENTITES="$DONNEES_DEFAUT/identites.db"
+        sudo mkdir -p "$DONNEES_DEFAUT"
+        sudo chown "$UTILISATEUR:$UTILISATEUR" "$DONNEES_DEFAUT"; sudo chmod 700 "$DONNEES_DEFAUT"
+        ok "noms des patients gardés sur le Pi : $IDENTITES"
+        AUTRE="$DONNEES/identites.db"
+    else
+        ok "noms des patients sur la clé : $DONNEES/identites.db"
+        avert "la clé contient des données nominatives en clair : ne pas la laisser traîner"
+        AUTRE="$DONNEES_DEFAUT/identites.db"
+    fi
+    # Une base nominative à l'autre emplacement n'est ni déplacée ni fusionnée.
+    if sudo test -s "$AUTRE"; then
+        avert "une base nominative existe aussi dans $AUTRE : elle n'est pas déplacée"
+    fi
 fi
 # exFAT n'a pas de propriétaire : il est fixé au montage (uid=, gid=).
 [ "${FS:-}" = "exfat" ] || sudo chown -R "$UTILISATEUR:$UTILISATEUR" "$DONNEES"
@@ -503,7 +546,8 @@ seuil_disque_mo     = 2000
 chemin = "$DONNEES"
 uuid   = "${UUID:-}"
 # identites vide = identites.db dans le volume de données. Renseigné quand ce
-# volume est une clé exFAT : la base nominative reste alors sur le Pi.
+# volume est une clé exFAT et qu'on a choisi de garder les noms sur le Pi
+# (./install.sh --identites cle|pi).
 identites = "$IDENTITES"
 
 [etat]
