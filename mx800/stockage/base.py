@@ -28,7 +28,7 @@ from pathlib import Path
 
 log = logging.getLogger('mx800.base')
 
-VERSION_SCHEMA = 2
+VERSION_SCHEMA = 3
 
 #: Schéma complet, appliqué tel quel à une base NEUVE. Une base existante
 #: passe par MIGRATIONS, une étape par version.
@@ -132,6 +132,21 @@ CREATE TABLE evenements (
     message     TEXT NOT NULL
 );
 CREATE INDEX idx_evenements_ts ON evenements(ts_utc);
+
+-- Copies vers une clé USB (mx800 copier). Une intervention n'est purgée du Pi
+-- qu'après relecture de sa copie : purge_utc dit que ses mesures et ses
+-- courbes ne sont plus ici, et la ligne dit où elles sont.
+CREATE TABLE archives (
+    id              INTEGER PRIMARY KEY,
+    intervention_id INTEGER NOT NULL REFERENCES interventions(id),
+    copie_utc       TEXT NOT NULL,
+    uuid_cle        TEXT,
+    dossier         TEXT NOT NULL,
+    octets          INTEGER,
+    empreintes      TEXT,
+    purge_utc       TEXT
+);
+CREATE INDEX idx_archives_intervention ON archives(intervention_id);
 """
 
 #: Migrations incrémentales. La v1 n'a jamais été déployée ; la v2 est écrite
@@ -145,6 +160,22 @@ MIGRATIONS: dict[int, str] = {
         ALTER TABLE mesures RENAME COLUMN nom TO parametre;
         CREATE INDEX IF NOT EXISTS idx_interventions_empreinte
             ON interventions(empreinte_patient);
+    """,
+    3: """
+        -- Copies vers une clé USB (mx800 copier). Une intervention n'est purgée du Pi
+        -- qu'après relecture de sa copie : purge_utc dit que ses mesures et ses
+        -- courbes ne sont plus ici, et la ligne dit où elles sont.
+        CREATE TABLE archives (
+            id              INTEGER PRIMARY KEY,
+            intervention_id INTEGER NOT NULL REFERENCES interventions(id),
+            copie_utc       TEXT NOT NULL,
+            uuid_cle        TEXT,
+            dossier         TEXT NOT NULL,
+            octets          INTEGER,
+            empreintes      TEXT,
+            purge_utc       TEXT
+        );
+        CREATE INDEX idx_archives_intervention ON archives(intervention_id);
     """,
 }
 

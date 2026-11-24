@@ -45,6 +45,7 @@ Détails (heure RTC, courbes, dépannage) : [`docs/exploitation.md`](docs/exploi
 mx800 etat              # est-ce que ça enregistre, là, maintenant ?
 mx800 interventions     # ce qui a été enregistré
 mx800 exporter CODE     # CSV d'une intervention
+mx800 copier            # tout copier sur une clé USB (exFAT), lisible sur Mac et Windows
 mx800 diagnostiquer     # pourquoi ça ne marche pas
 ```
 
@@ -68,6 +69,7 @@ mx800/
 outils/
   simulateur.py     moniteur MX800 simulé, avec injection de pannes
   console.py        commande `mx800`
+  copie.py          copie vers une clé USB, relecture, purge du Pi
   relire_courbes.py relecture HDF5 : calibration, complétude, tracé
   migrer.py         import de l'ancienne base
 deploiement/     unité systemd

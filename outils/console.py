@@ -11,6 +11,7 @@ d'erreur disent quoi faire.
     mx800 arreter                  clore l'intervention en cours
     mx800 interventions            ce qui a été enregistré
     mx800 exporter CODE            sortir une intervention en CSV
+    mx800 copier                   copier les interventions terminées sur une clé USB
     mx800 moniteurs                quels moniteurs sont visibles
     mx800 diagnostiquer            pourquoi ça ne marche pas
 """
@@ -18,8 +19,9 @@ d'erreur disent quoi faire.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +32,9 @@ from pathlib import Path
 from mx800 import config as K
 from mx800 import adressage
 from mx800.protocole import constantes as C
+from mx800.stockage import base as B
 from mx800.stockage import volume as V
+from outils import copie as X
 
 VERT, ROUGE, ORANGE, GRIS, NORMAL = '\033[32m', '\033[31m', '\033[33m', '\033[90m', '\033[0m'
 
@@ -145,6 +149,7 @@ def cmd_interventions(args, cfg) -> int:
                (SELECT count(*) FROM lacunes l WHERE l.intervention_id = i.id) AS lacunes,
                (SELECT count(*) FROM fichiers_courbes f WHERE f.intervention_id = i.id) AS courbes
         FROM interventions i ORDER BY i.id DESC LIMIT ?""", (args.limite,)).fetchall()
+    purgees = _purgees(conn)
     if not lignes:
         print("aucune intervention enregistrée")
         return 0
@@ -154,10 +159,24 @@ def cmd_interventions(args, cfg) -> int:
         etat = 'EN COURS' if l['fin_utc'] is None else 'terminée'
         if l['demonstration']:
             etat += ' DÉMO'
+        if l['code_recherche'] in purgees:
+            etat = 'sur clé'
         print(f"{l['code_recherche']:<26}{l['debut_utc'][:19]:<26}{etat:<12}"
               f"{l['mesures']:>9}{l['lacunes']:>9}{l['courbes']:>9}")
+    if purgees:
+        print(f"{GRIS}  « sur clé » : mesures et courbes copiées sur une clé USB puis "
+              f"retirées du Pi (mx800 copier --supprimer){NORMAL}")
     conn.close()
     return 0
+
+
+def _purgees(conn) -> set[str]:
+    """Codes des interventions dont les données ont été retirées du Pi après copie."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='archives'").fetchone():
+        return set()                      # base pas encore migrée
+    return {r[0] for r in conn.execute(
+        "SELECT i.code_recherche FROM archives a JOIN interventions i "
+        "ON i.id = a.intervention_id WHERE a.purge_utc IS NOT NULL")}
 
 
 def cmd_exporter(args, cfg) -> int:
@@ -179,32 +198,21 @@ def cmd_exporter(args, cfg) -> int:
         return 1
 
     condition = "" if args.invalides else " AND valide = 1"
-    lignes = conn.execute(
-        f"SELECT ts_utc, physio_id, parametre, valeur, etat FROM mesures "
-        f"WHERE intervention_id = ?{condition} ORDER BY ts_utc", (interv['id'],)).fetchall()
-    if not lignes:
-        print(f"aucune mesure pour {args.code}"
-              + ("" if args.invalides else " (essayer --invalides)"))
+    if not conn.execute(f"SELECT 1 FROM mesures WHERE intervention_id = ?{condition} LIMIT 1",
+                        (interv['id'],)).fetchone():
+        if args.code in _purgees(conn):
+            print(f"{args.code} a été copiée sur une clé USB puis retirée du Pi : "
+                  f"ses données sont sur la clé")
+        else:
+            print(f"aucune mesure pour {args.code}"
+                  + ("" if args.invalides else " (essayer --invalides)"))
         return 1
 
-    colonnes, par_instant = [], {}
-    for l in lignes:
-        nom = l['parametre'] or f"PHYSIO_{l['physio_id']:04X}"
-        if nom not in colonnes:
-            colonnes.append(nom)
-        par_instant.setdefault(l['ts_utc'], {})[nom] = l['valeur']
-    colonnes.sort()
-
     destination = args.sortie or (cfg.exports_dir / f"{args.code}.csv")
-    Path(destination).parent.mkdir(parents=True, exist_ok=True)
-    with open(destination, 'w', newline='', encoding='utf-8') as f:
-        ecrivain = csv.writer(f)
-        ecrivain.writerow(['ts_utc'] + colonnes)
-        for instant in sorted(par_instant):
-            valeurs = par_instant[instant]
-            ecrivain.writerow([instant] + [valeurs.get(c, '') for c in colonnes])
+    instants, parametres = X.ecrire_csv_large(conn, interv['id'], Path(destination),
+                                              invalides=args.invalides)
 
-    print(f"{len(par_instant)} instants × {len(colonnes)} paramètres → {destination}")
+    print(f"{instants} instants × {parametres} paramètres → {destination}")
     if not args.invalides:
         print(f"{GRIS}  mesures invalides exclues (état non nul, PIPG p. 77) — "
               f"--invalides pour les inclure{NORMAL}")
@@ -228,6 +236,152 @@ def cmd_exporter(args, cfg) -> int:
         print(f"  courbes : {c['chemin']} ({(c['octets'] or 0) / 1e6:.1f} Mo)")
         print(f"            python3 -m outils.relire_courbes {c['chemin']}")
     conn.close()
+    return 0
+
+
+def _choisir_cle(args, cfg) -> tuple[Path, X.Cle | None] | int:
+    """Renvoie (racine montée, clé) — clé None si --vers désigne un dossier."""
+    if args.vers and Path(args.vers).is_dir():
+        return Path(args.vers), None
+    cles = X.cles_usb()
+    if args.vers:
+        cles = [c for c in cles if c.peripherique == str(args.vers)]
+        if not cles:
+            print(f"{ROUGE}{args.vers} n'est ni un dossier ni une clé USB en "
+                  f"exFAT, FAT32 ou NTFS{NORMAL}")
+            return 1
+    if not cles:
+        print(f"{ROUGE}aucune clé USB lisible (exFAT, FAT32 ou NTFS) n'est branchée{NORMAL}")
+        print("  vérifier : lsblk -o NAME,SIZE,FSTYPE,TRAN")
+        return 1
+    if len(cles) > 1:
+        print("plusieurs clés USB sont branchées, préciser laquelle :")
+        for c in cles:
+            print(f"  mx800 copier --vers {c.peripherique}    ({c.taille}, {c.format})")
+        return 1
+    cle = cles[0]
+    # La clé ne doit pas être le volume où le service enregistre : la démonter
+    # couperait l'acquisition.
+    _, peripherique_donnees, _ = V.uuid_du_chemin(cfg.stockage.chemin)
+    if peripherique_donnees == cle.peripherique:
+        print(f"{ROUGE}{cle.peripherique} est le volume d'enregistrement du service : "
+              f"les données y sont déjà{NORMAL}")
+        return 1
+    if cle.monte_sur and not X.demonter(cle.monte_sur):
+        print(f"{ROUGE}{cle.peripherique} est montée sur {cle.monte_sur} et ne se "
+              f"démonte pas (fichier ouvert ?){NORMAL}")
+        return 1
+    return X.monter(cle), cle
+
+
+def cmd_copier(args, cfg) -> int:
+    """
+    Copie les interventions terminées sur une clé USB, relit la clé, puis —
+    avec --supprimer — retire du Pi ce qui a été relu à l'identique.
+    """
+    if not cfg.base.exists():
+        print(f"aucune base : {cfg.base}")
+        return 4
+    try:
+        choix = _choisir_cle(args, cfg)
+    except X.ErreurCopie as e:
+        print(f"{ROUGE}{e}{NORMAL}")
+        return 1
+    if isinstance(choix, int):
+        return choix
+    racine, cle = choix
+    if cle:
+        print(f"clé {cle.peripherique} ({cle.taille}, {cle.format})")
+
+    echecs = 0
+    try:
+        # Passe par Base : c'est elle qui amène le schéma à jour (table archives).
+        B.Base(cfg.base).fermer()
+        conn = sqlite3.connect(cfg.base, timeout=30, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        purgees = _purgees(conn)
+        a_copier = [i for i in X.interventions_terminees(conn, args.codes or None)
+                    if i['code_recherche'] not in purgees]
+        en_cours = conn.execute("SELECT code_recherche FROM interventions "
+                                "WHERE fin_utc IS NULL").fetchall()
+        for l in en_cours:
+            print(f"{GRIS}  {l[0]} : en cours, non copiée{NORMAL}")
+        if not a_copier:
+            print("aucune intervention terminée à copier")
+            return 0
+
+        besoin = sum(c.stat().st_size for i in a_copier for c in X._courbes_de(conn, cfg, i))
+        besoin += 250 * conn.execute(
+            "SELECT count(*) FROM mesures WHERE intervention_id IS NOT NULL").fetchone()[0]
+        libre = shutil.disk_usage(racine).free
+        if besoin > libre:
+            print(f"{ROUGE}place insuffisante sur la clé : {besoin / 1e6:.0f} Mo "
+                  f"nécessaires, {libre / 1e6:.0f} Mo libres{NORMAL}")
+            return 1
+
+        copies = []
+        for interv in a_copier:
+            c = X.copier_intervention(cfg, conn, interv, racine,
+                                      fat32=bool(cle and cle.format == 'vfat'))
+            copies.append(c)
+        valables = [c for c in copies if not c.erreur]
+        if args.nominatif and valables:
+            n = X.ecrire_identites(cfg, valables, racine, cfg.site.nom)
+            print(f"{ORANGE}  identites.csv : {n} patient(s) — la clé contient des "
+                  f"données de santé nominatives{NORMAL}")
+        try:
+            (racine / X.DOSSIER_RACINE).mkdir(exist_ok=True)
+            (racine / X.DOSSIER_RACINE / 'LISEZMOI.txt').write_text(X.LISEZMOI, encoding='utf-8')
+        except OSError:
+            pass
+
+        # Relecture. Clé montée par nous : démontage puis remontage en lecture
+        # seule, pour relire le support et non la mémoire du noyau.
+        if cle:
+            if not X.demonter(racine):
+                print(f"{ROUGE}la clé ne se démonte pas : relecture impossible{NORMAL}")
+                return 1
+            racine = X.monter(cle, lecture_seule=True)
+        else:
+            os.sync()
+        uuid_cle = cle.uuid if cle else V.uuid_du_chemin(racine)[0]
+
+        for c in copies:
+            if not c.erreur:
+                X.verifier_copie(cfg, conn, c, racine)
+            if not c.verifiee:
+                echecs += 1
+                print(f"  {ROUGE}ÉCHEC{NORMAL}   {c.code} : {c.erreur}")
+                continue
+            if not c.deja_presente or not conn.execute(
+                    "SELECT 1 FROM archives WHERE intervention_id=? AND purge_utc IS NULL",
+                    (c.intervention_id,)).fetchone():
+                X.enregistrer_archive(conn, c, uuid_cle=uuid_cle)
+            detail = (f"{c.comptes.get('mesures', 0)} mesures, "
+                      f"{len(c.courbes_source)} fichier(s) de courbes")
+            suffixe = " (déjà sur la clé)" if c.deja_presente else ""
+            if args.supprimer:
+                mesures, octets = X.purger(conn, c)
+                suffixe += f" — retirée du Pi ({octets / 1e6:.1f} Mo de courbes)"
+            print(f"  {VERT}vérifiée{NORMAL} {c.code} : {detail}{suffixe}")
+        conn.close()
+    except X.ErreurCopie as e:
+        print(f"{ROUGE}{e}{NORMAL}")
+        return 1
+    finally:
+        if cle:
+            if X.demonter(X.POINT_MONTAGE):
+                print(f"\nClé démontée : {VERT}vous pouvez la retirer.{NORMAL}")
+            else:
+                print(f"\n{ORANGE}la clé n'a pas pu être démontée : ne pas la retirer, "
+                      f"lancer sudo umount {X.POINT_MONTAGE}{NORMAL}")
+    if echecs:
+        print(f"{ROUGE}{echecs} intervention(s) non vérifiée(s) : rien n'en a été "
+              f"retiré du Pi. Relancer mx800 copier.{NORMAL}")
+        return 1
+    if not args.supprimer:
+        print(f"{GRIS}  les données restent aussi sur le Pi — --supprimer pour les "
+              f"en retirer après relecture de la clé{NORMAL}")
     return 0
 
 
@@ -361,6 +515,16 @@ def principal(argv=None) -> int:
     p.add_argument('--nominatif', action='store_true',
                    help="afficher l'identité du patient (données de santé)")
     p.set_defaults(fonction=cmd_exporter)
+
+    p = sous.add_parser('copier', help="copier les interventions terminées sur une clé USB")
+    p.add_argument('codes', nargs='*', help="codes à copier (défaut : toutes les terminées)")
+    p.add_argument('--vers', help="clé (/dev/sda1) ou dossier déjà monté ; "
+                                  "défaut : la clé USB branchée")
+    p.add_argument('--supprimer', action='store_true',
+                   help="retirer du Pi les mesures et courbes relues à l'identique sur la clé")
+    p.add_argument('--nominatif', action='store_true',
+                   help="joindre identites.csv, le lien code <-> patient (données de santé)")
+    p.set_defaults(fonction=cmd_copier)
 
     p = sous.add_parser('moniteurs', help="quels moniteurs sont visibles")
     p.set_defaults(fonction=cmd_moniteurs)

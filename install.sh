@@ -236,7 +236,7 @@ if [ -z "$STOCKAGE" ] && [ "$INTERACTIF" = 1 ]; then
     echo "  Où écrire les données ?"
     echo
     LIBRE_SD=$(df -m --output=avail / | tail -1 | tr -d ' ')
-    printf '    1) carte SD                %6s Mo libres   %s(usure à surveiller)%s\n' \
+    printf '    1) carte SD                %6s Mo libres   %s(recommandé — « mx800 copier » sort les données sur une clé)%s\n' \
            "$LIBRE_SD" "$G" "$N"
     # lsblk ne renseigne TRAN (usb) que sur le disque entier, jamais sur ses
     # partitions : filtrer les partitions sur TRAN ne trouvait donc aucun
@@ -483,7 +483,8 @@ PYEOF
     info "une onde que le moniteur n'expose pas (capteur absent, autre libellé) est"
     info "ignorée par lui et signalée dans le journal ; les autres sont enregistrées"
     if findmnt -no SOURCE --target "$DONNEES" 2>/dev/null | grep -q mmcblk; then
-        avert "données sur la carte SD : les courbes l'usent plus vite — un SSD USB est préférable (--stockage)"
+        info "données sur la carte SD : de l'ordre de 10 Mo par heure d'intervention ;"
+        info "« mx800 copier --supprimer » les transfère sur une clé USB et libère la carte"
     fi
 else
     COURBES_TOML=false; ONDES_TOML="[]"
@@ -627,6 +628,7 @@ ${V}Installation terminée.${N}
   Diagnostic        mx800 diagnostiquer
   Interventions     mx800 interventions
   Export            mx800 exporter CODE
+  Clé USB           mx800 copier          (brancher une clé exFAT ; --supprimer libère le Pi)
   Journal           journalctl -u mx800.service -f
 
   Configuration     sudo nano $CONFIG
